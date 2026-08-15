@@ -1,0 +1,42 @@
+# Dart/Flutter
+.dart_tool/
+.pub-cache/
+.packages
+build/
+pubspec.lock
+*.iml
+
+# Flutter
+.idea/
+.fvm/
+.flutter-plugins
+.flutter-plugins-dependencies
+*.hprof
+*.snapshot
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.vscode/
+.history/
+
+# Environment
+.env
+.env.*
+
+# Generated / temp
+*.log
+*.tmp
+*.temp
+repomix-*
+.hermes-temp/
+
+# Git
+.git/
+.gitignore
+
+# Docker (don't send the output of a previous build)
+.dockerignore

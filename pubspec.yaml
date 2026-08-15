@@ -1,0 +1,9 @@
+name: dartscl_workspace
+description: Root workspace for DartSCL
+environment:
+  sdk: '^3.5.0'
+
+workspace:
+  - packages/dartscl_protocol
+  - packages/dartscl_backend
+  - packages/dartscl_app

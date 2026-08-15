@@ -1,0 +1,6 @@
+# Web-only tests (see test/widget_test.dart) are skipped on the Dart VM,
+# where dart:js_interop / package:web are unavailable. Run them with:
+#   flutter test --platform chrome --run-skipped
+tags:
+  web:
+    skip: "Web-only test: requires a browser (dart:js_interop is not available on the VM)"

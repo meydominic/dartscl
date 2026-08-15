@@ -1,0 +1,14 @@
+services:
+  dartscl:
+    build: .
+    container_name: dartscl
+    # CRITICAL: Required for mDNS scanner discovery on the local network.
+    # Without host networking, the container cannot see mDNS/Bonjour services
+    # advertised by the scanner.
+    network_mode: host
+    environment:
+      - PORT=8080
+    # Store scanned PDFs persistently on the host
+    volumes:
+      - ./scans:/app/scans
+    restart: unless-stopped

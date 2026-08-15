@@ -120,9 +120,11 @@ cd packages/dartscl_app
 flutter run -d chrome
 ```
 
-Open the app in Chrome and scan away. The backend serves the API on
-`http://localhost:8080`; the app defaults to that base URL
-(`ApiService.baseUrl`, configurable in `packages/dartscl_app/lib/api_service.dart`).
+Open the app in Chrome and scan away. The app automatically resolves the
+backend base URL (`ApiService`): same-origin (relative URLs) when served by
+the backend itself on port 8080, otherwise `http://localhost:8080` as the
+development fallback. Override it explicitly with a dart-define if needed
+(see [Frontend configuration](#frontend-configuration)).
 
 > **Dev vs. prod static serving:** in development, the app runs on its own dev
 > server and talks to the backend via CORS (enabled). In production, the compiled
@@ -138,6 +140,20 @@ Open the app in Chrome and scan away. The backend serves the API on
 |-------------------|---------|-------------|
 | `PORT`            | `8080`  | HTTP port the backend listens on |
 | `DARTSCL_USE_MOCK`| `true`  | Mock scanner fallback when mDNS finds no devices. Set to `false` to disable (registry reports zero devices instead) |
+
+### Frontend configuration (build-time dart-define)
+
+| Dart-define                   | Default | Description |
+|-------------------------------|---------|-------------|
+| `DARTSCL_API_BASE_URL`        | *(auto)* | Overrides the backend API base URL. When unset, the app uses same-origin relative URLs if it is served on port 8080 (production deployment by the backend), otherwise `http://localhost:8080` (development). |
+
+```bash
+# Development against a backend on another host:
+flutter run -d chrome --dart-define=DARTSCL_API_BASE_URL=http://192.168.1.50:8080
+
+# Production build targeting a remote backend:
+flutter build web --dart-define=DARTSCL_API_BASE_URL=https://scanner.example.com
+```
 
 ### Notes
 
@@ -400,13 +416,6 @@ cp -r build/web ../dartscl_backend/static
   per-session) is a candidate improvement.
 - **Preview DPI is fixed at 100** in the frontend (safe across scanners,
   EPSON-verified); the preview does not use the user-selected DPI.
-- **`ApiService.baseUrl` is hardcoded** to `http://localhost:8080` in
-  `packages/dartscl_app/lib/api_service.dart`. For deployments where the app is
-  served from a different origin, make it configurable (e.g. `String.fromEnvironment`).
-- **Backend static base path** (`../static` relative to the server binary) is
-  designed for the AOT-compiled production binary; running `dart run
-  .dart_frog/server.dart` from the package directory works for the API, but
-  static file serving in that mode depends on the working directory layout.
 - **Single-user assumption**: the backend keeps one in-memory scanner/capability
   cache and one job-URL registry; concurrent scans from multiple clients are not
   serialized.

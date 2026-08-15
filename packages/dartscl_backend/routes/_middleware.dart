@@ -39,12 +39,35 @@ final Logger _log = Logger('Middleware');
 // Mock fallback is controlled via DARTSCL_USE_MOCK env var (default: on).
 final _scannerRegistry = ScannerRegistry();
 
-/// Base path for static web assets. Resolved relative to the server binary.
-/// In production (dart_frog build), the static/ directory is copied into
-/// the build output alongside bin/server.dart.
-final _staticBase = Directory.fromUri(
-  Platform.script.resolve('../static'),
-);
+/// Resolves the base directory for static web assets.
+///
+/// The location of `static/` differs between run modes:
+/// 1. **Working directory** — `dart run .dart_frog/server.dart` executed
+///    from the package directory (`packages/dartscl_backend/static`).
+/// 2. **AOT production binary** — `dart_frog build` copies `static/` next to
+///    `bin/server.dart`, so `../static` relative to the server binary
+///    resolves to `<build>/static`.
+/// 3. **Script-relative** — covers invocations where the server is started
+///    from a different working directory.
+///
+/// The first candidate that exists is used; if none exists, the AOT layout
+/// (candidate 2) is assumed as a fallback.
+Directory _resolveStaticBase() {
+  final scriptDir = File(Platform.script.toFilePath()).parent;
+  final candidates = <Directory>[
+    Directory('${Directory.current.path}/static'),
+    Directory.fromUri(Platform.script.resolve('../static')),
+    Directory('${scriptDir.path}/../static'),
+  ];
+  for (final candidate in candidates) {
+    if (candidate.existsSync()) return candidate;
+  }
+  return candidates[1];
+}
+
+/// Base path for static web assets, resolved per run mode (see
+/// [_resolveStaticBase]).
+final _staticBase = _resolveStaticBase();
 
 /// Mapping of file extensions to MIME types for static file serving.
 const _mimeTypes = <String, String>{

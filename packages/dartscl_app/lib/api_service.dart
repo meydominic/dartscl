@@ -4,15 +4,43 @@ import 'package:dartscl_protocol/dartscl_protocol.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 
+/// Build-time override for the backend API base URL.
+///
+/// Set it with a dart-define, e.g.:
+/// ```bash
+/// flutter build web --dart-define=DARTSCL_API_BASE_URL=https://scanner.example.com
+/// flutter run -d chrome --dart-define=DARTSCL_API_BASE_URL=http://192.168.1.50:8080
+/// ```
+/// When empty (default), [defaultApiBaseUrl] resolves the base URL at runtime.
+const String _envApiBaseUrl = String.fromEnvironment('DARTSCL_API_BASE_URL');
+
+/// Resolves the backend API base URL at runtime.
+///
+/// Priority:
+/// 1. An explicit `DARTSCL_API_BASE_URL` dart-define (see [_envApiBaseUrl]).
+/// 2. Same-origin (empty string → relative URLs) when the app is served by
+///    the Dart Frog backend itself on port 8080 (production deployment).
+/// 3. `http://localhost:8080` as the development fallback (e.g. when running
+///    the app via `flutter run -d chrome` on its own dev server port).
+String get defaultApiBaseUrl {
+  if (_envApiBaseUrl.isNotEmpty) return _envApiBaseUrl;
+  if (Uri.base.port == 8080) return '';
+  return 'http://localhost:8080';
+}
+
 /// Service for communicating with the DartSCL Dart Frog backend API.
 class ApiService {
+  /// Base URL of the backend, without a trailing slash. An empty string
+  /// means same-origin (relative URLs), which works when the app is served
+  /// by the backend itself.
   final String baseUrl;
   final http.Client client;
 
   ApiService({
-    this.baseUrl = 'http://localhost:8080',
+    String? baseUrl,
     http.Client? client,
-  }) : client = client ?? http.Client();
+  })  : baseUrl = baseUrl ?? defaultApiBaseUrl,
+        client = client ?? http.Client();
 
   /// Fetches all discovered eSCL scanners from `GET /api/v1/scanners`.
   Future<List<ScannerDevice>> fetchScanners() async {

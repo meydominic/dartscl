@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:dart_frog/dart_frog.dart';
 
+import 'package:dartscl_backend/src/scan_storage.dart';
 import 'package:dartscl_backend/src/scanner_registry.dart';
 import 'package:logging/logging.dart';
 
@@ -38,6 +39,10 @@ final Logger _log = Logger('Middleware');
 // Singleton instances held across the server lifecycle.
 // Mock fallback is controlled via DARTSCL_USE_MOCK env var (default: on).
 final _scannerRegistry = ScannerRegistry();
+
+/// Persistent storage for scanned files. Configured via SCAN_STORAGE_PATH,
+/// SCAN_MAX_STORAGE, SCAN_STORAGE_FULL_POLICY, SCAN_RETENTION_DAYS.
+final _scanStorage = ScanStorage.fromEnvironment();
 
 /// Resolves the base directory for static web assets.
 ///
@@ -100,6 +105,7 @@ Handler middleware(Handler handler) {
 
   return handler
       .use(provider<ScannerRegistry>((_) => _scannerRegistry))
+      .use(provider<ScanStorage>((_) => _scanStorage))
       .use(_staticFilesMiddleware())
       .use(_corsMiddleware());
 }

@@ -8,6 +8,12 @@ analyzer:
   exclude:
     - 'build/**'
     - '.dart_frog/**'
+    - android/**
+    - ios/**
+    - web/**
+    - windows/**
+    - macos/**
+    - linux/**
 
 linter:
   rules:

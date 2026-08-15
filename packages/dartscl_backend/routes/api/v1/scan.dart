@@ -5,24 +5,17 @@ import 'package:dart_frog/dart_frog.dart';
 import 'package:dartscl_backend/src/escl_client.dart';
 import 'package:dartscl_backend/src/mock_scanner_service.dart';
 import 'package:dartscl_backend/src/pdf_processing_pipeline.dart';
+import 'package:dartscl_backend/src/scan_storage.dart';
 import 'package:dartscl_backend/src/scanner_registry.dart';
 import 'package:dartscl_protocol/dartscl_protocol.dart';
 import 'package:uuid/uuid.dart';
 
-/// Matches the UUID format produced by `Uuid().v4()` (8-4-4-4-12 hex).
-///
-/// Used to validate `targetPdfId` before it is interpolated into a file
-/// path, preventing path traversal through user-supplied input.
-final RegExp _uuidPattern = RegExp(
-  r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
-);
-
 /// Handles POST /api/v1/scan — accepts a [ScanJobConfig] JSON body.
 ///
-/// For preview scans: returns raw JPEG bytes.
-/// For final scans with JPEG format: returns JPEG bytes.
-/// For final scans with PDF format: converts to PDF, appends if needed,
-/// and returns the PDF bytes.
+/// Preview scans return raw JPEG bytes (never persisted). Final scans are
+/// persisted to [ScanStorage] (JPEG or PDF) and returned for download, with
+/// the stored file's id in the `X-Scan-Id` header so the client can select
+/// it as the next append target.
 Future<Response> onRequest(RequestContext context) async {
   if (context.request.method != HttpMethod.post) {
     return Response(statusCode: 405);
@@ -32,25 +25,27 @@ Future<Response> onRequest(RequestContext context) async {
     final json = await context.request.json() as Map<String, dynamic>;
     final config = ScanJobConfig.fromJson(json);
 
-    // targetPdfId is interpolated into a file path below — only accept
-    // backend-generated UUIDs to prevent path traversal.
-    if (config.targetPdfId != null &&
-        !_uuidPattern.hasMatch(config.targetPdfId!)) {
-      return Response.json(
-        statusCode: 400,
-        body: {'error': 'Invalid targetPdfId format'},
-      );
-    }
-
-    // Appending requires a previously stored PDF from this backend.
-    if (config.targetMode == TargetMode.append && config.targetPdfId == null) {
-      return Response.json(
-        statusCode: 400,
-        body: {'error': 'targetPdfId is required when targetMode is append'},
-      );
-    }
-
     final registry = context.read<ScannerRegistry>();
+    final storage = context.read<ScanStorage>();
+
+    // Appending requires a previously stored PDF (id is validated against the
+    // storage index, so arbitrary paths can never be constructed).
+    if (config.targetMode == TargetMode.append) {
+      if (config.targetPdfId == null) {
+        return Response.json(
+          statusCode: 400,
+          body: {'error': 'targetPdfId is required when targetMode is append'},
+        );
+      }
+      final target = storage.get(config.targetPdfId!);
+      if (target == null || target.mimeType != 'application/pdf') {
+        return Response.json(
+          statusCode: 404,
+          body: {'error': 'Target PDF not found: ${config.targetPdfId}'},
+        );
+      }
+    }
+
     final device = registry.getDevice(config.scannerId);
 
     // Unknown scanner IDs must 404 — only mock-* IDs fall back to dummy data.
@@ -71,7 +66,7 @@ Future<Response> onRequest(RequestContext context) async {
     }
 
     if (config.intent == ScanIntent.preview) {
-      // Preview is always JPEG for browser display
+      // Preview is always JPEG for browser display — never persisted.
       return Response.bytes(
         body: imageBytes,
         headers: {
@@ -81,87 +76,29 @@ Future<Response> onRequest(RequestContext context) async {
       );
     }
 
-    // --- Final scan handling ---
-    final isPdf = config.documentFormat == 'application/pdf';
-
-    if (!isPdf) {
-      // Return raw JPEG/PNG bytes
+    // --- Final scan: persist the result, then return it for download ---
+    if (config.documentFormat != 'application/pdf') {
+      final record = await storage.save(imageBytes, mimeType: 'image/jpeg');
       return Response.bytes(
         body: imageBytes,
         headers: {
           'Content-Type': 'image/jpeg',
-          'Content-Disposition':
-              'attachment; filename="scan-${DateTime.now().millisecondsSinceEpoch}.jpg"',
+          'Content-Disposition': 'attachment; filename="${record.name}"',
+          'X-Scan-Id': record.id,
+          'X-Scan-Name': record.name,
         },
       );
     }
 
-    // --- PDF output path ---
-    final tmpDir = Directory.systemTemp;
-    final scanId = const Uuid().v4();
-    final newPagePath = '${tmpDir.path}/${scanId}_newpage.pdf';
-    final outputPath = '${tmpDir.path}/${scanId}_output.pdf';
-
-    try {
-      // Convert scanned image to a single-page PDF
-      final pdfBytes =
-          await PdfProcessingPipeline.convertImageToPdf(imageBytes);
-      await File(newPagePath).writeAsBytes(pdfBytes);
-
-      Uint8List resultBytes;
-
-      if (config.targetMode == TargetMode.append) {
-        // Append to existing PDF (targetPdfId validated above)
-        final existingPath = '${tmpDir.path}/${config.targetPdfId}.pdf';
-        if (!await File(existingPath).exists()) {
-          throw Exception('Target PDF not found: ${config.targetPdfId}');
-        }
-
-        await PdfProcessingPipeline.appendPdfPage(
-          existingPdfPath: existingPath,
-          newPagePdfPath: newPagePath,
-          outputPath: outputPath,
-        );
-
-        resultBytes = await File(outputPath).readAsBytes();
-
-        // Clean up temp files
-        await PdfProcessingPipeline.deleteTempFile(newPagePath);
-        await PdfProcessingPipeline.deleteTempFile(outputPath);
-      } else {
-        // New PDF — just return the single page
-        resultBytes = pdfBytes;
-        await PdfProcessingPipeline.deleteTempFile(newPagePath);
-      }
-
-      // Persist the result so future append scans can chain onto it:
-      // a new PDF is stored under its fresh scanId (returned as X-Scan-Id),
-      // an appended PDF overwrites the previously stored file.
-      final storedPath = config.targetMode == TargetMode.newPdf
-          ? '${tmpDir.path}/$scanId.pdf'
-          : '${tmpDir.path}/${config.targetPdfId}.pdf';
-      await File(storedPath).writeAsBytes(resultBytes);
-
-      // The client needs a stable scan ID to chain append scans: for a new
-      // PDF that is the fresh scanId, for an append it is the targetPdfId
-      // under which the merged result was persisted.
-      final returnedScanId =
-          config.targetMode == TargetMode.append ? config.targetPdfId! : scanId;
-
-      return Response.bytes(
-        body: resultBytes,
-        headers: {
-          'Content-Type': 'application/pdf',
-          'Content-Disposition':
-              'attachment; filename="scan-${DateTime.now().millisecondsSinceEpoch}.pdf"',
-          'X-Scan-Id': returnedScanId,
-        },
-      );
-    } finally {
-      // Ensure temp files are cleaned up even on errors
-      await PdfProcessingPipeline.deleteTempFile(newPagePath);
-      await PdfProcessingPipeline.deleteTempFile(outputPath);
+    if (config.targetMode == TargetMode.append) {
+      return await _appendPdf(storage, config, imageBytes);
     }
+    return await _newPdf(storage, imageBytes);
+  } on StorageFullException catch (e) {
+    return Response.json(
+      statusCode: 507,
+      body: {'error': 'storage_full', 'message': e.toString()},
+    );
   } on EsclException catch (e) {
     if (e.isBusy) {
       return Response.json(
@@ -179,4 +116,67 @@ Future<Response> onRequest(RequestContext context) async {
       body: {'error': e.toString()},
     );
   }
+}
+
+/// Converts the scanned image to a single-page PDF and stores it as a new
+/// file in [storage].
+Future<Response> _newPdf(
+  ScanStorage storage,
+  Uint8List imageBytes,
+) async {
+  final pdfBytes = await PdfProcessingPipeline.convertImageToPdf(imageBytes);
+  final record = await storage.save(pdfBytes, mimeType: 'application/pdf');
+  return _pdfResponse(record, pdfBytes);
+}
+
+/// Appends the scanned page to an existing PDF (identified by
+/// [ScanJobConfig.targetPdfId]), replacing it in [storage] under the same id.
+Future<Response> _appendPdf(
+  ScanStorage storage,
+  ScanJobConfig config,
+  Uint8List imageBytes,
+) async {
+  final targetId = config.targetPdfId!;
+  final tmpDir = Directory.systemTemp;
+  final newPagePath = '${tmpDir.path}/${const Uuid().v4()}_newpage.pdf';
+  final outputPath = '${tmpDir.path}/${const Uuid().v4()}_output.pdf';
+
+  try {
+    final pdfBytes = await PdfProcessingPipeline.convertImageToPdf(imageBytes);
+    await File(newPagePath).writeAsBytes(pdfBytes);
+
+    await PdfProcessingPipeline.appendPdfPage(
+      existingPdfPath: storage.pathFor(targetId),
+      newPagePdfPath: newPagePath,
+      outputPath: outputPath,
+    );
+
+    final mergedBytes = await File(outputPath).readAsBytes();
+
+    // Same id → replaces the file, keeps its name, bumps modifiedAt so it
+    // appears at the top of the history.
+    final record = await storage.save(
+      mergedBytes,
+      mimeType: 'application/pdf',
+      id: targetId,
+    );
+    return _pdfResponse(record, mergedBytes);
+  } finally {
+    await PdfProcessingPipeline.deleteTempFile(newPagePath);
+    await PdfProcessingPipeline.deleteTempFile(outputPath);
+  }
+}
+
+/// Builds a PDF download response with the stored file's id in `X-Scan-Id`
+/// and its display name in `X-Scan-Name`.
+Response _pdfResponse(ScannedFile record, Uint8List bytes) {
+  return Response.bytes(
+    body: bytes,
+    headers: {
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': 'attachment; filename="${record.name}"',
+      'X-Scan-Id': record.id,
+      'X-Scan-Name': record.name,
+    },
+  );
 }

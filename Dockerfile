@@ -88,6 +88,12 @@ COPY --from=dart-builder /workspace/bin/server /app/bin/server
 # Static web files (Flutter Web build)
 COPY --from=dart-builder /workspace/packages/dartscl_backend/static /app/static
 
+# Scan storage defaults (mount a volume at SCAN_STORAGE_PATH to persist)
+ENV SCAN_STORAGE_PATH=/app/scans \
+    SCAN_MAX_STORAGE=1GB \
+    SCAN_STORAGE_FULL_POLICY=error \
+    SCAN_RETENTION_DAYS=365
+
 EXPOSE 8080
 
 CMD ["/app/bin/server"]

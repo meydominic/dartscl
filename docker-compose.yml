@@ -8,7 +8,12 @@ services:
     network_mode: host
     environment:
       - PORT=8080
-    # Store scanned PDFs persistently on the host
+      # Scan storage
+      - SCAN_STORAGE_PATH=/app/scans
+      - SCAN_MAX_STORAGE=1GB                   # e.g. 512MB, 2G, or bare bytes
+      - SCAN_STORAGE_FULL_POLICY=error         # error | evict-oldest
+      - SCAN_RETENTION_DAYS=365
+    # Store scanned files persistently on the host
     volumes:
       - ./scans:/app/scans
     restart: unless-stopped

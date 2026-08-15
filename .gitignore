@@ -19,6 +19,9 @@ repomix*
 # build or manually via `flutter build web` — see README)
 packages/dartscl_backend/static/
 
+# Persisted scan files (SCAN_STORAGE_PATH default; user data, not source)
+packages/dartscl_backend/scans/
+
 # IntelliJ module files
 *.iml
 

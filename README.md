@@ -46,6 +46,13 @@ keeps scanner credentials/traffic off the client.
   - append pages to a previously scanned PDF (`pdf_manipulator`),
   - chained appends (page 1 → page 2 → page 3 …) via a stable scan ID.
 - **JPEG or PDF output**, either inline (preview) or as a browser download.
+- **Scan history**: every final scan (JPEG + PDF) is persisted server-side and
+  listed in the UI with its file size and timestamp — open it inline in the
+  browser, download it, or delete it.
+- **Configurable storage retention**: scanned files are kept in a
+  configurable directory, with a size limit and a retention period (see
+  [Configuration](#configuration)). When the limit is reached you can either
+  evict the oldest files automatically or fail the scan.
 - **Mock fallback** for development without hardware (`DARTSCL_USE_MOCK`).
 - **Single-container deployment** serving both the REST API and the compiled
   Flutter Web app (multi-stage Docker build, scratch runtime image).
@@ -136,10 +143,14 @@ development fallback. Override it explicitly with a dart-define if needed
 
 ### Environment variables (backend)
 
-| Variable          | Default | Description |
-|-------------------|---------|-------------|
-| `PORT`            | `8080`  | HTTP port the backend listens on |
-| `DARTSCL_USE_MOCK`| `true`  | Mock scanner fallback when mDNS finds no devices. Set to `false` to disable (registry reports zero devices instead) |
+| Variable                   | Default             | Description |
+|----------------------------|---------------------|-------------|
+| `PORT`                     | `8080`              | HTTP port the backend listens on |
+| `DARTSCL_USE_MOCK`         | `true`              | Mock scanner fallback when mDNS finds no devices. Set to `false` to disable (registry reports zero devices instead) |
+| `SCAN_STORAGE_PATH`        | `./scans`           | Directory where scanned files are persisted (in Docker: `/app/scans`) |
+| `SCAN_MAX_STORAGE`         | `1GB`               | Maximum total size of stored scans. Accepts a human-readable size (`512MB`, `2G`, `1GB`) or a bare byte count (`1073741824`); units are binary (1024-based) |
+| `SCAN_STORAGE_FULL_POLICY` | `error`             | What happens when the limit is reached: `error` (refuse the scan, HTTP 507) or `evict-oldest` (delete the oldest files until the new one fits) |
+| `SCAN_RETENTION_DAYS`      | `365`               | How long scanned files are kept; older files are deleted on startup and on every save |
 
 ### Frontend configuration (build-time dart-define)
 
@@ -245,12 +256,41 @@ Triggers a scan. Request body is a `ScanJobConfig` (see `dartscl_protocol`):
   - finalScan PDF → `application/pdf`, `Content-Disposition: attachment`,
     plus `X-Scan-Id` header with the **stable scan ID** to use as
     `targetPdfId` for the next append scan.
-- `400` — invalid `targetPdfId` format (only UUIDs are accepted — prevents path
-  traversal) or `targetMode: append` without `targetPdfId`
-- `404` — unknown `scannerId`
+- `400` — `targetMode: append` without `targetPdfId`
+- `404` — unknown `scannerId`, or `targetPdfId` that does not reference a
+  stored PDF
 - `405` — wrong HTTP method
 - `503` — scanner busy (`{"error": "scanner_busy"}`)
+- `507` — storage full and policy is `error` (`{"error": "storage_full"}`)
 - `500` — other scanner/processing errors (`{"error": "<message>"}`)
+
+### `GET /api/v1/scans`
+
+Returns metadata for all stored scans, most recently modified first.
+
+```json
+[
+  {
+    "id": "bd6ff821-6ffa-4eaa-9711-2a9f99c972a9",
+    "name": "Scan 2026-08-15 20:30:00.pdf",
+    "mimeType": "application/pdf",
+    "sizeBytes": 391980,
+    "createdAt": "2026-08-15T18:30:00.000",
+    "modifiedAt": "2026-08-15T18:30:00.000"
+  }
+]
+```
+
+### `GET /api/v1/scans/[id]`
+
+Returns the stored file bytes. By default the response is `inline` (browser
+viewer); add `?download=1` to force a download (`Content-Disposition:
+attachment`). Unknown id → `404`.
+
+### `DELETE /api/v1/scans/[id]`
+
+Deletes the stored file and its metadata. Returns `204` on success, `404` if
+the id is unknown.
 
 ### Static file serving
 
@@ -314,29 +354,37 @@ like:
    (1-second interval, up to 60 attempts).
 2. Optional software crop via `image` package (`cropImage`).
 3. JPEG → single-page PDF via `pdf` package.
-4. **New PDF:** stored under a fresh UUID (`scanId`), returned as `X-Scan-Id`.
-5. **Append:** merged with the stored target PDF via `pdf_manipulator`
-   (`pdf.merge`), the result **overwrites** the stored file, and the same
-   stable `X-Scan-Id` is returned — so any number of appends chain onto the
-   previous result (1 → 2 → 3 pages …).
-6. Temporary files (`*_newpage.pdf`, `*_output.pdf`) are deleted in a `finally`
-   block; only the persisted PDFs for append chaining remain in the system temp
-   directory.
+4. Final results are persisted to the configured storage directory
+   (`SCAN_STORAGE_PATH`) with a metadata index (`scans.json`), so they show up
+   in the scan history. Preview scans are never persisted.
+5. **New PDF:** stored as a new file with a fresh id, returned as `X-Scan-Id`.
+6. **Append:** the new page is merged with the target PDF via `pdf_manipulator`
+   (`pdf.merge`), replacing the file under the same id (name kept, `modifiedAt`
+   bumped so it moves to the top of the history). Any number of appends chain
+   onto the same file (1 → 2 → 3 pages …).
+7. Temporary files (`*_newpage.pdf`, `*_output.pdf`) are deleted in a `finally`
+   block.
 
-The frontend stores the last `X-Scan-Id` and sends it as `targetPdfId` when
-`targetMode` is `append`; the UI disables the "Append to PDF" option until a
-PDF has been scanned in the current session.
+The append target is picked in a dropdown listing all stored PDFs (most
+recently modified first) plus a "New PDF" option. After a scan, the
+just-created/appended PDF is automatically pre-selected.
 
 ---
 
 ## Frontend (Flutter Web)
 
 - **State management:** Riverpod (`flutter_riverpod`). Providers/notifiers for
-  scanner list, selected scanner, capabilities, preview image, scan status and
-  crop region (see `lib/api_service.dart`).
+  scanner list, selected scanner, capabilities, preview image, scan status,
+  crop region and scan history (see `lib/api_service.dart`).
 - **Main screen** (`lib/main.dart`): sidebar with scanner/settings dropdowns
-  (DPI, color mode, source, output format, target mode) + preview area with
+  (DPI, color mode, source, output format, append target) + preview area with
   status bar and crop overlay.
+- **Append target** (`lib/main.dart`): a dropdown listing "New PDF" plus every
+  stored PDF (most recently modified first), with the just-created PDF
+  pre-selected after a scan.
+- **Scan history** (`lib/main.dart`): a history view (toggled from the app bar)
+  listing stored scans with file size and timestamp, plus open-in-browser,
+  download and delete actions.
 - **Crop overlay** (`lib/crop_overlay.dart`): `CustomPainter`-based selection
   box with corner resize handles, move gesture, rule-of-thirds grid, and
   relative-coordinate mapping to `CropRegion`.
@@ -387,6 +435,10 @@ docker compose up -d --build
 
 The image serves both the REST API and the Flutter Web UI on port 8080.
 
+Scanned files are written to `/app/scans` inside the container
+(`SCAN_STORAGE_PATH`); mount a volume there to persist them across restarts —
+`docker compose` already does this (`./scans:/app/scans`).
+
 **Build pipeline** (`Dockerfile`):
 
 1. **Flutter builder** (`cirrusci/flutter:stable`) — `flutter build web --release`
@@ -410,10 +462,11 @@ cp -r build/web ../dartscl_backend/static
 
 ## Known limitations
 
-- **Stored PDFs have no TTL**: PDFs persisted for append chaining live in the
-  system temp directory and are never garbage-collected. A long-running server
-  will accumulate them; a restart clears them. A cleanup policy (age-based or
-  per-session) is a candidate improvement.
+- **Storage eviction is whole-file**: retention and the size limit operate on
+  complete scan files, not pages within a PDF. Appending to a large PDF can
+  push it over the limit in a single save (the limit is enforced on the new
+  total, so a scan may be refused even if evicting a few small files would
+  not free enough space).
 - **Preview DPI is fixed at 100** in the frontend (safe across scanners,
   EPSON-verified); the preview does not use the user-selected DPI.
 - **Single-user assumption**: the backend keeps one in-memory scanner/capability

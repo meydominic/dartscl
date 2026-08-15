@@ -101,3 +101,34 @@ class ScanJobConfig {
 
   Map<String, dynamic> toJson() => _$ScanJobConfigToJson(this);
 }
+
+/// Metadata for a scanned file persisted on the backend.
+///
+/// Used by the scan history list (`GET /api/v1/scans`) and the append-target
+/// dropdown. [modifiedAt] changes when a file is appended to, which keeps the
+/// most recently used PDFs at the top of the list.
+@JsonSerializable()
+class ScannedFile {
+  final String id;
+
+  /// Human-readable display name (e.g. "Scan 2026-08-15 20:30:00.pdf").
+  final String name;
+  final String mimeType;
+  final int sizeBytes;
+  final DateTime createdAt;
+  final DateTime modifiedAt;
+
+  const ScannedFile({
+    required this.id,
+    required this.name,
+    required this.mimeType,
+    required this.sizeBytes,
+    required this.createdAt,
+    required this.modifiedAt,
+  });
+
+  factory ScannedFile.fromJson(Map<String, dynamic> json) =>
+      _$ScannedFileFromJson(json);
+
+  Map<String, dynamic> toJson() => _$ScannedFileToJson(this);
+}

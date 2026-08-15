@@ -83,3 +83,22 @@ const _$TargetModeEnumMap = {
   TargetMode.newPdf: 'newPdf',
   TargetMode.append: 'append',
 };
+
+ScannedFile _$ScannedFileFromJson(Map<String, dynamic> json) => ScannedFile(
+      id: json['id'] as String,
+      name: json['name'] as String,
+      mimeType: json['mimeType'] as String,
+      sizeBytes: (json['sizeBytes'] as num).toInt(),
+      createdAt: DateTime.parse(json['createdAt'] as String),
+      modifiedAt: DateTime.parse(json['modifiedAt'] as String),
+    );
+
+Map<String, dynamic> _$ScannedFileToJson(ScannedFile instance) =>
+    <String, dynamic>{
+      'id': instance.id,
+      'name': instance.name,
+      'mimeType': instance.mimeType,
+      'sizeBytes': instance.sizeBytes,
+      'createdAt': instance.createdAt.toIso8601String(),
+      'modifiedAt': instance.modifiedAt.toIso8601String(),
+    };

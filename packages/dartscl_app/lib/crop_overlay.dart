@@ -100,6 +100,7 @@ class _CropOverlayState extends State<CropOverlay> {
             painter: _CropOverlayPainter(
               selection: _selection,
               handleSize: _handleSize,
+              primary: Theme.of(context).colorScheme.primary,
             ),
           ),
         );
@@ -302,8 +303,13 @@ enum _DragHandle { move, topLeft, topRight, bottomLeft, bottomRight }
 class _CropOverlayPainter extends CustomPainter {
   final Rect? selection;
   final double handleSize;
+  final Color primary;
 
-  _CropOverlayPainter({required this.selection, required this.handleSize});
+  _CropOverlayPainter({
+    required this.selection,
+    required this.handleSize,
+    required this.primary,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -326,14 +332,14 @@ class _CropOverlayPainter extends CustomPainter {
 
     // Selection border.
     final borderPaint = Paint()
-      ..color = const Color(0xFF38BDF8)
+      ..color = primary
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2.0;
     canvas.drawRect(sel, borderPaint);
 
     // Dashed rule-of-thirds grid lines.
     final gridPaint = Paint()
-      ..color = const Color(0x5538BDF8)
+      ..color = primary.withValues(alpha: 0.33)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.0;
     final thirdW = sel.width / 3;
@@ -352,7 +358,7 @@ class _CropOverlayPainter extends CustomPainter {
     }
 
     // Corner handles.
-    final handlePaint = Paint()..color = const Color(0xFF38BDF8);
+    final handlePaint = Paint()..color = primary;
     final corners = [
       sel.topLeft,
       sel.topRight,
@@ -372,6 +378,6 @@ class _CropOverlayPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _CropOverlayPainter oldDelegate) {
-    return oldDelegate.selection != selection;
+    return oldDelegate.selection != selection || oldDelegate.primary != primary;
   }
 }

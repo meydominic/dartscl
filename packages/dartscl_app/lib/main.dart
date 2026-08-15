@@ -1,5 +1,5 @@
-import 'dart:js_interop';
 import 'dart:typed_data';
+
 import 'package:web/web.dart' as web;
 import 'package:dartscl_protocol/dartscl_protocol.dart';
 import 'package:flutter/material.dart';
@@ -8,6 +8,7 @@ import 'package:google_fonts/google_fonts.dart';
 
 import 'api_service.dart';
 import 'crop_overlay.dart';
+import 'l10n/app_localizations.dart';
 
 void main() {
   runApp(
@@ -19,8 +20,10 @@ void main() {
 
 /// Root widget of the DartSCL Web Scanner application.
 ///
-/// Sets up the Material theme with a dark color scheme and Inter/Outfit
-/// typography via Google Fonts.
+/// Builds a Material 3 theme (light and dark, following the system) with
+/// Inter/Outfit typography, and English/German localizations (following the
+/// system language). All colors come from the [ColorScheme] roles; the UI
+/// never hardcodes palette values.
 class DartSclWebApp extends StatelessWidget {
   const DartSclWebApp({super.key});
 
@@ -29,15 +32,55 @@ class DartSclWebApp extends StatelessWidget {
     return MaterialApp(
       title: 'DartSCL AirScan Web',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF0F172A),
-        colorScheme: const ColorScheme.dark(
-          primary: Color(0xFF38BDF8),
-          surface: Color(0xFF1E293B),
-        ),
-        textTheme: GoogleFonts.interTextTheme(ThemeData.dark().textTheme),
-      ),
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      theme: _buildTheme(Brightness.light),
+      darkTheme: _buildTheme(Brightness.dark),
+      themeMode: ThemeMode.system,
       home: const MainScanScreen(),
+    );
+  }
+
+  ThemeData _buildTheme(Brightness brightness) {
+    final scheme = ColorScheme.fromSeed(
+      seedColor: const Color(0xFF0284C7),
+      brightness: brightness,
+    );
+    final base = ThemeData(brightness: brightness, colorScheme: scheme);
+
+    // Inter for body text, Outfit for large headings.
+    final inter = GoogleFonts.interTextTheme(base.textTheme);
+    final outfit = GoogleFonts.outfitTextTheme(base.textTheme);
+    final textTheme = inter.copyWith(titleLarge: outfit.titleLarge);
+
+    final borderRadius = BorderRadius.circular(12);
+
+    return base.copyWith(
+      textTheme: textTheme,
+      appBarTheme: AppBarTheme(
+        backgroundColor: scheme.surfaceContainerLow,
+        elevation: 0,
+        titleTextStyle: textTheme.titleLarge?.copyWith(
+          color: scheme.onSurface,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: scheme.surfaceContainerHigh,
+        border: OutlineInputBorder(
+          borderRadius: borderRadius,
+          borderSide: BorderSide.none,
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: borderRadius,
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: borderRadius,
+          borderSide: BorderSide(color: scheme.primary, width: 2),
+        ),
+      ),
     );
   }
 }
@@ -46,7 +89,8 @@ class DartSclWebApp extends StatelessWidget {
 ///
 /// The sidebar provides scanner selection, scan configuration (DPI, color mode,
 /// source, target mode), crop info display, and action buttons. The right area
-/// shows a preview image with an interactive crop overlay.
+/// shows a preview image with an interactive crop overlay. A history view can
+/// be toggled from the app bar.
 class MainScanScreen extends ConsumerStatefulWidget {
   const MainScanScreen({super.key});
 
@@ -54,20 +98,50 @@ class MainScanScreen extends ConsumerStatefulWidget {
   ConsumerState<MainScanScreen> createState() => _MainScanScreenState();
 }
 
-class _MainScanScreenState extends ConsumerState<MainScanScreen> {
+class _MainScanScreenState extends ConsumerState<MainScanScreen>
+    with SingleTickerProviderStateMixin {
   int _dpi = 300;
   String _colorMode = 'RGB24';
   String _documentFormat = 'image/jpeg';
   DocumentSource _source = DocumentSource.platen;
-  TargetMode _targetMode = TargetMode.newPdf;
   bool _isScanning = false;
 
-  /// Scan ID of the last PDF produced by this backend, required as
-  /// `targetPdfId` when appending to that PDF in a subsequent scan.
-  String? _lastPdfId;
+  /// Whether the history view (instead of the scan view) is shown.
+  bool _showHistory = false;
+
+  /// ID of the PDF that new pages should be appended to. `null` means
+  /// "create a new PDF". Auto-set to the most recently created/appended PDF
+  /// so it is pre-selected in the append-target dropdown.
+  String? _targetPdfId;
+
+  /// Drives the rotating status icon while a scan is in progress.
+  late final AnimationController _spinnerController;
+
+  AppLocalizations get _l10n => AppLocalizations.of(context)!;
+
+  ColorScheme get _scheme => Theme.of(context).colorScheme;
+
+  TextTheme get _textTheme => Theme.of(context).textTheme;
+
+  @override
+  void initState() {
+    super.initState();
+    _spinnerController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 1),
+    );
+  }
+
+  @override
+  void dispose() {
+    _spinnerController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
+    final l10n = _l10n;
+    final scheme = _scheme;
     final scannersAsync = ref.watch(scannersProvider);
     final selectedScannerId = ref.watch(selectedScannerIdProvider);
     final capsAsync = ref.watch(capabilitiesProvider);
@@ -75,49 +149,54 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
     final statusText = ref.watch(scanStatusProvider);
     final cropRegion = ref.watch(cropRegionProvider);
 
+    final displayStatus = statusText.isEmpty ? l10n.ready : statusText;
+
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: const Color(0xFF1E293B),
-        elevation: 0,
         title: Row(
           children: [
-            const Icon(Icons.scanner, color: Color(0xFF38BDF8)),
+            Icon(Icons.scanner, color: scheme.primary),
             const SizedBox(width: 12),
-            Text(
-              'DartSCL Web Scanner',
-              style: GoogleFonts.outfit(
-                fontWeight: FontWeight.bold,
-                fontSize: 20,
-              ),
-            ),
+            Text(l10n.appTitle),
           ],
         ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: () => ref.refresh(scannersProvider),
-            tooltip: 'Reload scanners',
+            icon: Icon(
+              _showHistory ? Icons.scanner : Icons.history,
+              color: scheme.primary,
+            ),
+            onPressed: () => setState(() => _showHistory = !_showHistory),
+            tooltip: _showHistory ? l10n.backToScan : l10n.scanHistory,
           ),
+          if (!_showHistory)
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              onPressed: () => ref.refresh(scannersProvider),
+              tooltip: l10n.reloadScanners,
+            ),
         ],
       ),
-      body: Row(
-        children: [
-          // Left Sidebar: Controls & Configuration
-          _buildSidebar(
-            scannersAsync: scannersAsync,
-            selectedScannerId: selectedScannerId,
-            capsAsync: capsAsync,
-            cropRegion: cropRegion,
-          ),
-          // Right Area: Interactive Preview & Crop Canvas
-          _buildPreviewArea(
-            previewBytes: previewBytes,
-            statusText: statusText,
-            isScanning: _isScanning,
-            cropRegion: cropRegion,
-          ),
-        ],
-      ),
+      body: _showHistory
+          ? _buildHistoryView()
+          : Row(
+              children: [
+                // Left Sidebar: Controls & Configuration
+                _buildSidebar(
+                  scannersAsync: scannersAsync,
+                  selectedScannerId: selectedScannerId,
+                  capsAsync: capsAsync,
+                  cropRegion: cropRegion,
+                ),
+                // Right Area: Interactive Preview & Crop Canvas
+                _buildPreviewArea(
+                  previewBytes: previewBytes,
+                  statusText: displayStatus,
+                  isScanning: _isScanning,
+                  cropRegion: cropRegion,
+                ),
+              ],
+            ),
     );
   }
 
@@ -128,28 +207,29 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
     required AsyncValue<Map<String, dynamic>> capsAsync,
     required CropRegion? cropRegion,
   }) {
+    final l10n = _l10n;
     return Container(
       width: 340,
-      color: const Color(0xFF1E293B),
+      color: _scheme.surfaceContainerLow,
       padding: const EdgeInsets.all(20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _sectionLabel('SCANNER SELECTION'),
+          _sectionLabel(l10n.scannerSelection),
           const SizedBox(height: 10),
           _buildScannerSelector(scannersAsync, selectedScannerId),
           const SizedBox(height: 24),
-          _sectionLabel('SETTINGS'),
+          _sectionLabel(l10n.settings),
           const SizedBox(height: 12),
           _buildCapabilitiesSettings(capsAsync),
           const SizedBox(height: 12),
           _buildDocumentFormatDropdown(capsAsync),
           const SizedBox(height: 12),
           _buildSourceDropdown(),
-          // Only show target mode when PDF output is selected
+          // Only show append-target when PDF output is selected
           if (_documentFormat == 'application/pdf') ...[
             const SizedBox(height: 12),
-            _buildTargetModeDropdown(),
+            _buildPdfTargetDropdown(),
           ],
           if (cropRegion != null) ...[
             const SizedBox(height: 16),
@@ -166,10 +246,9 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
   Widget _sectionLabel(String text) {
     return Text(
       text,
-      style: GoogleFonts.inter(
-        fontSize: 12,
+      style: _textTheme.labelSmall?.copyWith(
         fontWeight: FontWeight.w700,
-        color: const Color(0xFF94A3B8),
+        color: _scheme.onSurfaceVariant,
         letterSpacing: 1.2,
       ),
     );
@@ -180,10 +259,11 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
     AsyncValue<List<ScannerDevice>> scannersAsync,
     String? selectedScannerId,
   ) {
+    final l10n = _l10n;
     return scannersAsync.when(
       data: (scanners) {
         if (scanners.isEmpty) {
-          return const Text('No scanners found.');
+          return Text(l10n.noScannersFound);
         }
         if (selectedScannerId == null && scanners.isNotEmpty) {
           Future.microtask(() {
@@ -192,32 +272,35 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
                 .setScannerId(scanners.first.id);
           });
         }
-        return DropdownButtonFormField<String>(
-          initialValue: selectedScannerId ?? scanners.first.id,
-          isExpanded: true,
-          decoration: InputDecoration(
-            filled: true,
-            fillColor: const Color(0xFF0F172A),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: BorderSide.none,
-            ),
+        final selectedId = selectedScannerId ?? scanners.first.id;
+        final selected = scanners.firstWhere(
+          (s) => s.id == selectedId,
+          orElse: () => scanners.first,
+        );
+        return Tooltip(
+          message: '${selected.name} (${selected.ip})',
+          waitDuration: const Duration(milliseconds: 400),
+          child: DropdownButtonFormField<String>(
+            initialValue: selectedId,
+            isExpanded: true,
+            items: scanners.map((s) {
+              return DropdownMenuItem(
+                value: s.id,
+                child: Text('${s.name} (${s.ip})',
+                    overflow: TextOverflow.ellipsis),
+              );
+            }).toList(),
+            onChanged: (val) {
+              ref.read(selectedScannerIdProvider.notifier).setScannerId(val);
+            },
           ),
-          items: scanners.map((s) {
-            return DropdownMenuItem(
-              value: s.id,
-              child:
-                  Text('${s.name} (${s.ip})', overflow: TextOverflow.ellipsis),
-            );
-          }).toList(),
-          onChanged: (val) {
-            ref.read(selectedScannerIdProvider.notifier).setScannerId(val);
-          },
         );
       },
       loading: () => const CircularProgressIndicator(),
-      error: (err, stack) =>
-          Text('Error: $err', style: const TextStyle(color: Colors.redAccent)),
+      error: (err, stack) => Text(
+        l10n.errorText(err.toString()),
+        style: TextStyle(color: _scheme.error),
+      ),
     );
   }
 
@@ -225,6 +308,7 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
   Widget _buildCapabilitiesSettings(
     AsyncValue<Map<String, dynamic>> capsAsync,
   ) {
+    final l10n = _l10n;
     return capsAsync.when(
       data: (caps) {
         final dpis = (caps['dpi'] as List<dynamic>?)?.cast<int>() ??
@@ -239,7 +323,7 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
             DropdownButtonFormField<int>(
               initialValue: dpis.contains(_dpi) ? _dpi : dpis.first,
               isExpanded: true,
-              decoration: const InputDecoration(labelText: 'Resolution (DPI)'),
+              decoration: InputDecoration(labelText: l10n.resolutionDpi),
               items: dpis
                   .map((d) => DropdownMenuItem(value: d, child: Text('$d DPI')))
                   .toList(),
@@ -253,7 +337,7 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
                   ? _colorMode
                   : colorModes.first,
               isExpanded: true,
-              decoration: const InputDecoration(labelText: 'Color mode'),
+              decoration: InputDecoration(labelText: l10n.colorMode),
               items: colorModes
                   .map((m) => DropdownMenuItem(value: m, child: Text(m)))
                   .toList(),
@@ -274,6 +358,7 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
   Widget _buildDocumentFormatDropdown(
     AsyncValue<Map<String, dynamic>> capsAsync,
   ) {
+    final l10n = _l10n;
     return capsAsync.when(
       data: (caps) {
         final formats =
@@ -290,12 +375,12 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
               ? _documentFormat
               : formats.first,
           isExpanded: true,
-          decoration: const InputDecoration(labelText: 'Output format'),
+          decoration: InputDecoration(labelText: l10n.outputFormat),
           items: formats.map((f) {
             final label = f == 'image/jpeg'
-                ? 'JPEG image'
+                ? l10n.jpegImage
                 : f == 'application/pdf'
-                    ? 'PDF document'
+                    ? l10n.pdfDocument
                     : f;
             return DropdownMenuItem(value: f, child: Text(label));
           }).toList(),
@@ -303,10 +388,10 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
             if (val != null) {
               setState(() {
                 _documentFormat = val;
-                // When switching to JPEG, reset target mode to newPdf
-                // since append only makes sense for PDF
+                // When switching to JPEG, reset the append target since
+                // appending only makes sense for PDF.
                 if (val != 'application/pdf') {
-                  _targetMode = TargetMode.newPdf;
+                  _targetPdfId = null;
                 }
               });
             }
@@ -320,18 +405,19 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
 
   /// Builds the document source (Platen/ADF) dropdown.
   Widget _buildSourceDropdown() {
+    final l10n = _l10n;
     return DropdownButtonFormField<DocumentSource>(
       initialValue: _source,
       isExpanded: true,
-      decoration: const InputDecoration(labelText: 'Source'),
-      items: const [
+      decoration: InputDecoration(labelText: l10n.source),
+      items: [
         DropdownMenuItem(
             value: DocumentSource.platen,
-            child: Text('Flatbed (Platen)', overflow: TextOverflow.ellipsis)),
+            child: Text(l10n.flatbedPlaten, overflow: TextOverflow.ellipsis)),
         DropdownMenuItem(
             value: DocumentSource.adf,
             child:
-                Text('Document Feeder (ADF)', overflow: TextOverflow.ellipsis)),
+                Text(l10n.documentFeederAdf, overflow: TextOverflow.ellipsis)),
       ],
       onChanged: (val) {
         if (val != null) setState(() => _source = val);
@@ -339,50 +425,75 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
     );
   }
 
-  /// Builds the target mode (new PDF / append) dropdown.
-  Widget _buildTargetModeDropdown() {
-    return DropdownButtonFormField<TargetMode>(
-      initialValue: _targetMode,
-      isExpanded: true,
-      decoration: const InputDecoration(labelText: 'Target mode'),
-      items: [
-        const DropdownMenuItem(
-            value: TargetMode.newPdf,
-            child: Text('Create new PDF', overflow: TextOverflow.ellipsis)),
-        DropdownMenuItem(
-            value: TargetMode.append,
-            enabled: _lastPdfId != null,
-            child:
-                const Text('Append to PDF', overflow: TextOverflow.ellipsis)),
-      ],
-      onChanged: (val) {
-        if (val != null) setState(() => _targetMode = val);
+  /// Builds the PDF append-target dropdown: "New PDF" plus every existing
+  /// PDF, most recently modified first, with the just-created PDF
+  /// pre-selected.
+  Widget _buildPdfTargetDropdown() {
+    final l10n = _l10n;
+    final scansAsync = ref.watch(scansProvider);
+    return scansAsync.when(
+      data: (scans) {
+        final pdfs =
+            scans.where((s) => s.mimeType == 'application/pdf').toList();
+
+        // If the selected PDF no longer exists (e.g. deleted in the
+        // history), reset to "New PDF" to avoid an invalid dropdown value.
+        final selectedId =
+            _targetPdfId != null && pdfs.any((p) => p.id == _targetPdfId)
+                ? _targetPdfId
+                : null;
+        if (selectedId == null && _targetPdfId != null) {
+          Future.microtask(() => setState(() => _targetPdfId = null));
+        }
+
+        return DropdownButtonFormField<String?>(
+          initialValue: selectedId,
+          isExpanded: true,
+          decoration: InputDecoration(labelText: l10n.appendTo),
+          items: [
+            DropdownMenuItem<String?>(
+              value: null,
+              child: Text(l10n.newPdf, overflow: TextOverflow.ellipsis),
+            ),
+            for (final pdf in pdfs)
+              DropdownMenuItem<String?>(
+                value: pdf.id,
+                child: Text(pdf.name, overflow: TextOverflow.ellipsis),
+              ),
+          ],
+          onChanged: (val) {
+            setState(() => _targetPdfId = val);
+          },
+        );
       },
+      loading: () => const LinearProgressIndicator(),
+      error: (_, __) => const SizedBox.shrink(),
     );
   }
 
   /// Renders a small info card showing the current crop region ratios.
   Widget _buildCropInfo(CropRegion cropRegion) {
+    final l10n = _l10n;
+    final scheme = _scheme;
     return Container(
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
-        color: const Color(0xFF0F172A),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: const Color(0xFF38BDF8), width: 0.5),
+        color: scheme.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: scheme.outlineVariant),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              const Icon(Icons.crop, size: 14, color: Color(0xFF38BDF8)),
+              Icon(Icons.crop, size: 14, color: scheme.primary),
               const SizedBox(width: 6),
               Text(
-                'CROP',
-                style: GoogleFonts.inter(
-                  fontSize: 11,
+                l10n.crop,
+                style: _textTheme.labelSmall?.copyWith(
                   fontWeight: FontWeight.w700,
-                  color: const Color(0xFF94A3B8),
+                  color: scheme.onSurfaceVariant,
                   letterSpacing: 1.0,
                 ),
               ),
@@ -391,7 +502,7 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
                 onTap: () =>
                     ref.read(cropRegionProvider.notifier).setCropRegion(null),
                 child:
-                    const Icon(Icons.close, size: 14, color: Color(0xFF94A3B8)),
+                    Icon(Icons.close, size: 14, color: scheme.onSurfaceVariant),
               ),
             ],
           ),
@@ -401,8 +512,8 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
             'Y: ${(cropRegion.yRatio * 100).toStringAsFixed(1)}%\n'
             'W: ${(cropRegion.widthRatio * 100).toStringAsFixed(1)}%  '
             'H: ${(cropRegion.heightRatio * 100).toStringAsFixed(1)}%',
-            style: GoogleFonts.inter(
-                fontSize: 12, color: Colors.white70, height: 1.5),
+            style: _textTheme.bodySmall
+                ?.copyWith(color: scheme.onSurfaceVariant, height: 1.5),
           ),
         ],
       ),
@@ -414,17 +525,15 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
     String? selectedScannerId,
     CropRegion? cropRegion,
   ) {
+    final l10n = _l10n;
     return Column(
       children: [
         SizedBox(
           width: double.infinity,
           height: 44,
           child: OutlinedButton.icon(
-            style: OutlinedButton.styleFrom(
-              side: const BorderSide(color: Color(0xFF38BDF8)),
-            ),
             icon: const Icon(Icons.visibility),
-            label: const Text('Preview scan'),
+            label: Text(l10n.previewScan),
             onPressed: _isScanning || selectedScannerId == null
                 ? null
                 : () => _triggerPreviewScan(selectedScannerId),
@@ -434,16 +543,9 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
         SizedBox(
           width: double.infinity,
           height: 48,
-          child: ElevatedButton.icon(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF38BDF8),
-              foregroundColor: const Color(0xFF0F172A),
-            ),
+          child: FilledButton.icon(
             icon: const Icon(Icons.document_scanner),
-            label: Text(
-              cropRegion != null ? 'Scan crop region' : 'Scan',
-              style: GoogleFonts.inter(fontWeight: FontWeight.bold),
-            ),
+            label: Text(cropRegion != null ? l10n.scanCropRegion : l10n.scan),
             onPressed: _isScanning || selectedScannerId == null
                 ? null
                 : () => _triggerFinalScan(selectedScannerId),
@@ -460,9 +562,11 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
     required bool isScanning,
     required CropRegion? cropRegion,
   }) {
+    final l10n = _l10n;
+    final scheme = _scheme;
     return Expanded(
       child: Container(
-        color: const Color(0xFF0F172A),
+        color: scheme.surface,
         padding: const EdgeInsets.all(24),
         child: Column(
           children: [
@@ -470,31 +574,34 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
               decoration: BoxDecoration(
-                color: const Color(0xFF1E293B),
-                borderRadius: BorderRadius.circular(8),
+                color: scheme.surfaceContainerHigh,
+                borderRadius: BorderRadius.circular(12),
               ),
               child: Row(
                 children: [
-                  Icon(
-                    isScanning ? Icons.sync : Icons.info_outline,
-                    size: 18,
-                    color: const Color(0xFF38BDF8),
+                  RotationTransition(
+                    turns: _spinnerController,
+                    child: Icon(
+                      isScanning ? Icons.sync : Icons.info_outline,
+                      size: 18,
+                      color: scheme.primary,
+                    ),
                   ),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      'Status: $statusText',
-                      style: GoogleFonts.inter(
-                          fontSize: 14, color: Colors.white70),
+                      l10n.statusLabel(statusText),
+                      style: _textTheme.bodyMedium
+                          ?.copyWith(color: scheme.onSurfaceVariant),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
                   if (previewBytes != null) ...[
                     const SizedBox(width: 12),
                     Text(
-                      'Drag a rectangle on the image to select a crop region',
-                      style: GoogleFonts.inter(
-                          fontSize: 12, color: const Color(0xFF64748B)),
+                      l10n.dragCropHint,
+                      style:
+                          _textTheme.bodySmall?.copyWith(color: scheme.outline),
                     ),
                   ],
                 ],
@@ -506,9 +613,9 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
               child: Center(
                 child: Container(
                   decoration: BoxDecoration(
-                    color: const Color(0xFF1E293B),
+                    color: scheme.surfaceContainerHigh,
                     borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: const Color(0xFF334155)),
+                    border: Border.all(color: scheme.outlineVariant),
                   ),
                   clipBehavior: Clip.antiAlias,
                   child: previewBytes != null
@@ -534,13 +641,13 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
                       : Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            const Icon(Icons.image_outlined,
-                                size: 64, color: Color(0xFF64748B)),
+                            Icon(Icons.image_outlined,
+                                size: 64, color: scheme.outline),
                             const SizedBox(height: 16),
                             Text(
-                              'Click "Preview scan" to load the image',
-                              style: GoogleFonts.inter(
-                                  color: const Color(0xFF94A3B8)),
+                              l10n.clickPreviewHint,
+                              style: _textTheme.bodyMedium
+                                  ?.copyWith(color: scheme.onSurfaceVariant),
                             ),
                           ],
                         ),
@@ -553,27 +660,12 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
     );
   }
 
-  /// Triggers a browser file download via blob URL (Web only).
-  void _downloadBytes(Uint8List bytes, String mimeType, String filename) {
-    final blob = web.Blob(
-      [bytes.toJS].toJS,
-      web.BlobPropertyBag(type: mimeType),
-    );
-    final url = web.URL.createObjectURL(blob);
-    final anchor = web.HTMLAnchorElement()
-      ..href = url
-      ..download = filename
-      ..style.display = 'none';
-    web.document.body!.append(anchor);
-    anchor.click();
-    anchor.remove();
-    web.URL.revokeObjectURL(url);
-  }
-
   /// Triggers a preview scan at low resolution (100 DPI).
   Future<void> _triggerPreviewScan(String scannerId) async {
+    final l10n = _l10n;
     setState(() => _isScanning = true);
-    ref.read(scanStatusProvider.notifier).setStatus('Loading preview...');
+    _spinnerController.repeat();
+    ref.read(scanStatusProvider.notifier).setStatus(l10n.loadingPreview);
     // Reset crop when loading a new preview
     ref.read(cropRegionProvider.notifier).setCropRegion(null);
 
@@ -585,36 +677,35 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
         source: _source,
         dpi: 100,
         colorMode: _colorMode,
-        targetMode: _targetMode,
+        targetMode: TargetMode.newPdf,
         documentFormat: _documentFormat,
       );
 
       final bytes = await api.requestPreviewScan(config);
       ref.read(previewImageProvider.notifier).setImage(bytes);
+      ref.read(scanStatusProvider.notifier).setStatus(l10n.previewReady);
+    } catch (e) {
       ref
           .read(scanStatusProvider.notifier)
-          .setStatus('Preview ready — select a crop region or scan directly.');
-    } catch (e) {
-      ref.read(scanStatusProvider.notifier).setStatus('Preview error: $e');
+          .setStatus(l10n.previewError(e.toString()));
     } finally {
+      _spinnerController.stop();
+      _spinnerController.reset();
       setState(() => _isScanning = false);
     }
   }
 
   /// Triggers a final scan at the configured DPI.
   Future<void> _triggerFinalScan(String scannerId) async {
-    // Appending requires a PDF produced earlier in this session.
-    if (_targetMode == TargetMode.append && _lastPdfId == null) {
-      ref.read(scanStatusProvider.notifier).setStatus(
-            'Create a new PDF first — append needs a previous scan.',
-          );
-      return;
-    }
+    final l10n = _l10n;
+    final isPdf = _documentFormat == 'application/pdf';
+    final appendTarget = isPdf ? _targetPdfId : null;
 
     setState(() => _isScanning = true);
+    _spinnerController.repeat();
     final crop = ref.read(cropRegionProvider);
     ref.read(scanStatusProvider.notifier).setStatus(
-        crop != null ? 'Scanning crop region...' : 'Scanning document...');
+        crop != null ? l10n.scanningCropRegion : l10n.scanningDocument);
 
     try {
       final api = ref.read(apiServiceProvider);
@@ -625,35 +716,193 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen> {
         dpi: _dpi,
         colorMode: _colorMode,
         crop: crop,
-        targetMode: _targetMode,
-        targetPdfId: _targetMode == TargetMode.append ? _lastPdfId : null,
+        targetMode:
+            appendTarget == null ? TargetMode.newPdf : TargetMode.append,
+        targetPdfId: appendTarget,
         documentFormat: _documentFormat,
       );
 
       final result = await api.triggerFinalScan(config);
-      final isPdf = _documentFormat == 'application/pdf';
 
       if (isPdf) {
-        // Remember the stable scan ID so a subsequent append scan can
-        // chain onto the PDF the backend just persisted.
-        _lastPdfId = result.scanId ?? _lastPdfId;
+        // Pre-select the just-created/appended PDF for the next scan.
+        setState(() => _targetPdfId = result.scanId);
       }
 
-      final mimeType = isPdf ? 'application/pdf' : 'image/jpeg';
-      final extension = isPdf ? 'pdf' : 'jpg';
+      final name = result.scanName ?? (isPdf ? 'scan.pdf' : 'scan.jpg');
       ref.read(scanStatusProvider.notifier).setStatus(
-            '${extension.toUpperCase()} ready (${result.bytes.length} bytes) — download starting...',
+            l10n.savedStatus(name, result.bytes.length.toString()),
           );
-      // Trigger browser download via blob URL
-      _downloadBytes(
-        result.bytes,
-        mimeType,
-        'scan-${DateTime.now().millisecondsSinceEpoch}.$extension',
-      );
+
+      // Show a toast (Material 3 SnackBar) with the saved file's name.
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(l10n.saved(name))),
+        );
+      }
+
+      // Refresh the history so the new file appears immediately.
+      ref.invalidate(scansProvider);
     } catch (e) {
-      ref.read(scanStatusProvider.notifier).setStatus('Scan error: $e');
+      ref
+          .read(scanStatusProvider.notifier)
+          .setStatus(l10n.scanError(e.toString()));
     } finally {
+      _spinnerController.stop();
+      _spinnerController.reset();
       setState(() => _isScanning = false);
     }
+  }
+
+  /// Builds the scan history view (replaces the scan/preview area).
+  Widget _buildHistoryView() {
+    final l10n = _l10n;
+    final scheme = _scheme;
+    final scansAsync = ref.watch(scansProvider);
+    return Container(
+      width: double.infinity,
+      color: scheme.surface,
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.history, color: scheme.primary),
+              const SizedBox(width: 12),
+              Text(l10n.scanHistory, style: _textTheme.titleLarge),
+              const Spacer(),
+              IconButton(
+                icon: Icon(Icons.refresh, color: scheme.onSurfaceVariant),
+                onPressed: () => ref.invalidate(scansProvider),
+                tooltip: l10n.refreshHistory,
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          Expanded(
+            child: scansAsync.when(
+              data: (scans) {
+                if (scans.isEmpty) {
+                  return Center(
+                    child: Text(
+                      l10n.noScansYet,
+                      style: TextStyle(color: scheme.onSurfaceVariant),
+                    ),
+                  );
+                }
+                return ListView.separated(
+                  itemCount: scans.length,
+                  separatorBuilder: (_, __) =>
+                      Divider(color: scheme.outlineVariant),
+                  itemBuilder: (context, index) =>
+                      _buildHistoryItem(scans[index]),
+                );
+              },
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (err, _) => Center(
+                child: Text(
+                  l10n.errorText(err.toString()),
+                  style: TextStyle(color: scheme.error),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Builds a single history row with open/download/delete actions.
+  Widget _buildHistoryItem(ScannedFile file) {
+    final l10n = _l10n;
+    final scheme = _scheme;
+    final api = ref.read(apiServiceProvider);
+    final isPdf = file.mimeType == 'application/pdf';
+    return ListTile(
+      leading: Icon(
+        isPdf ? Icons.picture_as_pdf : Icons.image,
+        color: scheme.primary,
+      ),
+      title: Text(
+        file.name,
+        style: TextStyle(color: scheme.onSurface),
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: Text(
+        '${_formatBytes(file.sizeBytes)} · ${_formatDate(file.modifiedAt)}',
+        style: TextStyle(color: scheme.onSurfaceVariant),
+      ),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            icon: Icon(Icons.open_in_new, color: scheme.primary),
+            tooltip: l10n.openInBrowser,
+            onPressed: () => _openScan(api, file),
+          ),
+          IconButton(
+            icon: Icon(Icons.download, color: scheme.onSurfaceVariant),
+            tooltip: l10n.download,
+            onPressed: () => _downloadScan(api, file),
+          ),
+          IconButton(
+            icon: Icon(Icons.delete_outline, color: scheme.error),
+            tooltip: l10n.delete,
+            onPressed: () => _deleteScan(api, file),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Opens a stored file inline in a new browser tab.
+  void _openScan(ApiService api, ScannedFile file) {
+    web.window.open(api.scanFileUrl(file.id), '_blank');
+  }
+
+  /// Triggers a browser download of a stored file.
+  void _downloadScan(ApiService api, ScannedFile file) {
+    final anchor = web.HTMLAnchorElement()
+      ..href = api.scanDownloadUrl(file.id)
+      ..download = file.name;
+    web.document.body!.append(anchor);
+    anchor.click();
+    anchor.remove();
+  }
+
+  /// Deletes a stored file and refreshes the history.
+  Future<void> _deleteScan(ApiService api, ScannedFile file) async {
+    final l10n = _l10n;
+    try {
+      await api.deleteScan(file.id);
+      ref.invalidate(scansProvider);
+      ref
+          .read(scanStatusProvider.notifier)
+          .setStatus(l10n.deletedStatus(file.name));
+    } catch (e) {
+      ref
+          .read(scanStatusProvider.notifier)
+          .setStatus(l10n.deleteError(e.toString()));
+    }
+  }
+
+  /// Formats a byte count as a human-readable size (B/KB/MB/GB).
+  String _formatBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) {
+      return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    }
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+  }
+
+  /// Formats a timestamp as `yyyy-MM-dd HH:mm`.
+  String _formatDate(DateTime dt) {
+    String p2(int n) => n.toString().padLeft(2, '0');
+    return '${dt.year}-${p2(dt.month)}-${p2(dt.day)} '
+        '${p2(dt.hour)}:${p2(dt.minute)}';
   }
 }

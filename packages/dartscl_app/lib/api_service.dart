@@ -98,19 +98,53 @@ class ApiService {
     return ScanResult(
       bytes: response.bodyBytes,
       scanId: response.headers['x-scan-id'],
+      scanName: response.headers['x-scan-name'],
     );
+  }
+
+  /// Fetches the stored scan history from `GET /api/v1/scans`.
+  Future<List<ScannedFile>> fetchScans() async {
+    final response = await client.get(Uri.parse('$baseUrl/api/v1/scans'));
+    if (response.statusCode != 200) {
+      throw Exception('Failed to load scans: ${response.statusCode}');
+    }
+    final List<dynamic> jsonList = jsonDecode(response.body);
+    return jsonList
+        .map((j) => ScannedFile.fromJson(j as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// URL of a stored file, for opening inline in a browser tab.
+  String scanFileUrl(String id) => '$baseUrl/api/v1/scans/$id';
+
+  /// URL of a stored file with `?download=1`, forcing a download.
+  String scanDownloadUrl(String id) => '$baseUrl/api/v1/scans/$id?download=1';
+
+  /// Deletes a stored file via `DELETE /api/v1/scans/[id]`.
+  ///
+  /// A 404 (already gone) is treated as success for idempotency.
+  Future<void> deleteScan(String id) async {
+    final response =
+        await client.delete(Uri.parse('$baseUrl/api/v1/scans/$id'));
+    if (response.statusCode != 204 && response.statusCode != 404) {
+      throw Exception('Failed to delete scan: ${response.statusCode}');
+    }
   }
 }
 
 /// Result of a final scan request: the raw response bytes plus the
-/// backend-generated scan ID used to chain append scans.
+/// backend-generated scan ID and display name used to chain append scans
+/// and to show a confirmation toast.
 class ScanResult {
   final Uint8List bytes;
 
   /// Backend scan ID (`X-Scan-Id` header); null for non-PDF responses.
   final String? scanId;
 
-  const ScanResult({required this.bytes, this.scanId});
+  /// Display name of the stored file (`X-Scan-Name` header).
+  final String? scanName;
+
+  const ScanResult({required this.bytes, this.scanId, this.scanName});
 }
 
 // ---------------------------------------------------------------------------
@@ -126,6 +160,12 @@ final apiServiceProvider = Provider<ApiService>((ref) {
 final scannersProvider = FutureProvider<List<ScannerDevice>>((ref) async {
   final api = ref.watch(apiServiceProvider);
   return api.fetchScanners();
+});
+
+/// Provider that fetches the stored scan history.
+final scansProvider = FutureProvider<List<ScannedFile>>((ref) async {
+  final api = ref.watch(apiServiceProvider);
+  return api.fetchScans();
 });
 
 // ---------------------------------------------------------------------------
@@ -166,9 +206,12 @@ final previewImageProvider = NotifierProvider<PreviewImageNotifier, Uint8List?>(
 );
 
 /// Notifier that holds the current scan status message.
+///
+/// Defaults to an empty string; the UI shows a localized "ready" text when
+/// it is empty.
 class ScanStatusNotifier extends Notifier<String> {
   @override
-  String build() => 'Ready';
+  String build() => '';
 
   void setStatus(String status) => state = status;
 }

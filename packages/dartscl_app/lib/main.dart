@@ -191,24 +191,250 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen>
       ),
       body: _showHistory
           ? _buildHistoryView()
-          : Row(
-              children: [
-                // Left Sidebar: Controls & Configuration
-                _buildSidebar(
-                  scannersAsync: scannersAsync,
-                  selectedScannerId: selectedScannerId,
-                  capsAsync: capsAsync,
-                  cropRegion: cropRegion,
-                ),
-                // Right Area: Interactive Preview & Crop Canvas
-                _buildPreviewArea(
-                  previewBytes: previewBytes,
-                  statusText: displayStatus,
-                  isScanning: _isScanning,
-                  cropRegion: cropRegion,
-                ),
-              ],
+          : LayoutBuilder(
+              builder: (context, constraints) {
+                // M3 adaptive layout: two-pane (sidebar + preview) when the
+                // window is wide enough, single scrollable column on phones.
+                final isCompact = constraints.maxWidth < 720;
+                if (isCompact) {
+                  return _buildCompactLayout(
+                    scannersAsync: scannersAsync,
+                    selectedScannerId: selectedScannerId,
+                    capsAsync: capsAsync,
+                    previewBytes: previewBytes,
+                    displayStatus: displayStatus,
+                    cropRegion: cropRegion,
+                  );
+                }
+                return Row(
+                  children: [
+                    // Left Sidebar: Controls & Configuration
+                    _buildSidebar(
+                      scannersAsync: scannersAsync,
+                      selectedScannerId: selectedScannerId,
+                      capsAsync: capsAsync,
+                      cropRegion: cropRegion,
+                    ),
+                    // Right Area: Interactive Preview & Crop Canvas
+                    _buildPreviewArea(
+                      previewBytes: previewBytes,
+                      statusText: displayStatus,
+                      isScanning: _isScanning,
+                      cropRegion: cropRegion,
+                    ),
+                  ],
+                );
+              },
             ),
+    );
+  }
+
+  /// Builds the single-column layout used on phones (compact width).
+  ///
+  /// The preview comes first so the camera-facing content is immediately
+  /// visible, followed by the configuration controls and the action buttons
+  /// in one scrollable column. The action buttons stay reachable via a
+  /// sticky bottom bar so scanning is possible without scrolling.
+  Widget _buildCompactLayout({
+    required AsyncValue<List<ScannerDevice>> scannersAsync,
+    required String? selectedScannerId,
+    required AsyncValue<Map<String, dynamic>> capsAsync,
+    required Uint8List? previewBytes,
+    required String displayStatus,
+    required CropRegion? cropRegion,
+  }) {
+    final l10n = _l10n;
+    final scheme = _scheme;
+    return Scaffold(
+      backgroundColor: scheme.surface,
+      // Both actions live in a fixed bottom bar so they are reachable without
+      // scrolling and the preview gets the full content height.
+      bottomNavigationBar: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+          child: Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size.fromHeight(48),
+                  ),
+                  icon: const Icon(Icons.visibility),
+                  label: Text(l10n.previewScan),
+                  onPressed: _isScanning || selectedScannerId == null
+                      ? null
+                      : () => _triggerPreviewScan(selectedScannerId),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size.fromHeight(48),
+                  ),
+                  icon: _isScanning
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child:
+                              CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.document_scanner),
+                  label: Text(
+                    cropRegion != null ? l10n.scanCropRegion : l10n.scan,
+                  ),
+                  onPressed: _isScanning || selectedScannerId == null
+                      ? null
+                      : () => _triggerFinalScan(selectedScannerId),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          _buildCompactPreview(
+            previewBytes: previewBytes,
+            displayStatus: displayStatus,
+            cropRegion: cropRegion,
+          ),
+          const SizedBox(height: 16),
+          _buildCompactSettings(
+            scannersAsync: scannersAsync,
+            selectedScannerId: selectedScannerId,
+            capsAsync: capsAsync,
+            cropRegion: cropRegion,
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Preview card for the compact layout: status line plus image viewer.
+  Widget _buildCompactPreview({
+    required Uint8List? previewBytes,
+    required String displayStatus,
+    required CropRegion? cropRegion,
+  }) {
+    final l10n = _l10n;
+    final scheme = _scheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            RotationTransition(
+              turns: _spinnerController,
+              child: Icon(
+                _isScanning ? Icons.sync : Icons.info_outline,
+                size: 18,
+                color: scheme.primary,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                l10n.statusLabel(displayStatus),
+                style: _textTheme.bodyMedium
+                    ?.copyWith(color: scheme.onSurfaceVariant),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Container(
+          decoration: BoxDecoration(
+            color: scheme.surfaceContainerHigh,
+            borderRadius: BorderRadius.circular(_panelRadius),
+            border: Border.all(color: scheme.outlineVariant),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: previewBytes != null
+              ? Stack(
+                  fit: StackFit.passthrough,
+                  children: [
+                    AspectRatio(
+                      aspectRatio: 4 / 3,
+                      child: Image.memory(previewBytes, fit: BoxFit.contain),
+                    ),
+                    Positioned.fill(
+                      child: CropOverlay(
+                        initialCrop: cropRegion,
+                        onCropChanged: (region) {
+                          ref
+                              .read(cropRegionProvider.notifier)
+                              .setCropRegion(region);
+                        },
+                      ),
+                    ),
+                  ],
+                )
+              : AspectRatio(
+                  aspectRatio: 4 / 3,
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.image_outlined,
+                          size: 56, color: scheme.outline),
+                      const SizedBox(height: 12),
+                      Text(
+                        l10n.clickPreviewHint,
+                        textAlign: TextAlign.center,
+                        style: _textTheme.bodyMedium
+                            ?.copyWith(color: scheme.onSurfaceVariant),
+                      ),
+                    ],
+                  ),
+                ),
+        ),
+        if (cropRegion != null) ...[
+          const SizedBox(height: 12),
+          _buildCropInfo(cropRegion),
+        ],
+      ],
+    );
+  }
+
+  /// Settings card for the compact layout: scanner selection and all
+  /// configuration dropdowns inside a single surface container.
+  Widget _buildCompactSettings({
+    required AsyncValue<List<ScannerDevice>> scannersAsync,
+    required String? selectedScannerId,
+    required AsyncValue<Map<String, dynamic>> capsAsync,
+    required CropRegion? cropRegion,
+  }) {
+    final l10n = _l10n;
+    final scheme = _scheme;
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(_panelRadius),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _sectionLabel(l10n.scannerSelection),
+          const SizedBox(height: 10),
+          _buildScannerSelector(scannersAsync, selectedScannerId),
+          const SizedBox(height: 16),
+          _sectionLabel(l10n.settings),
+          const SizedBox(height: 12),
+          _buildCapabilitiesSettings(capsAsync),
+          const SizedBox(height: 12),
+          _buildDocumentFormatDropdown(capsAsync),
+          const SizedBox(height: 12),
+          _buildSourceDropdown(),
+          // Only show append-target when PDF output is selected
+          if (_documentFormat == 'application/pdf') ...[
+            const SizedBox(height: 12),
+            _buildPdfTargetDropdown(),
+          ],
+        ],
+      ),
     );
   }
 

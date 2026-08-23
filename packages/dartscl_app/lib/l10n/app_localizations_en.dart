@@ -68,7 +68,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get crop => 'CROP';
 
   @override
-  String get previewScan => 'Preview scan';
+  String get previewScan => 'Preview';
 
   @override
   String get scan => 'Scan';
@@ -86,7 +86,7 @@ class AppLocalizationsEn extends AppLocalizations {
       'Drag a rectangle on the image to select a crop region';
 
   @override
-  String get clickPreviewHint => 'Click \"Preview scan\" to load the image';
+  String get clickPreviewHint => 'Click \"Preview\" to load the image';
 
   @override
   String get noScansYet => 'No scans yet.';
@@ -148,4 +148,10 @@ class AppLocalizationsEn extends AppLocalizations {
   String deleteError(String error) {
     return 'Delete error: $error';
   }
+
+  @override
+  String get settingsSheetTitle => 'Settings';
+
+  @override
+  String get openSettings => 'Show settings';
 }

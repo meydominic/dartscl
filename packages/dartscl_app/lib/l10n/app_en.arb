@@ -10,7 +10,11 @@
   "errorText": "Error: {err}",
   "@errorText": {
     "description": "Generic error message with details",
-    "placeholders": { "err": { "type": "String" } }
+    "placeholders": {
+      "err": {
+        "type": "String"
+      }
+    }
   },
   "resolutionDpi": "Resolution (DPI)",
   "colorMode": "Color mode",
@@ -23,16 +27,20 @@
   "documentFeederAdf": "Document Feeder (ADF)",
   "newPdf": "New PDF",
   "crop": "CROP",
-  "previewScan": "Preview scan",
+  "previewScan": "Preview",
   "scan": "Scan",
   "scanCropRegion": "Scan crop region",
   "statusLabel": "Status: {status}",
   "@statusLabel": {
     "description": "Status bar prefix followed by the current status",
-    "placeholders": { "status": { "type": "String" } }
+    "placeholders": {
+      "status": {
+        "type": "String"
+      }
+    }
   },
   "dragCropHint": "Drag a rectangle on the image to select a crop region",
-  "clickPreviewHint": "Click \"Preview scan\" to load the image",
+  "clickPreviewHint": "Click \"Preview\" to load the image",
   "noScansYet": "No scans yet.",
   "openInBrowser": "Open in browser",
   "download": "Download",
@@ -44,36 +52,62 @@
   "previewError": "Preview error: {error}",
   "@previewError": {
     "description": "Preview scan failure message",
-    "placeholders": { "error": { "type": "String" } }
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
   },
   "scanningDocument": "Scanning document...",
   "scanningCropRegion": "Scanning crop region...",
   "scanError": "Scan error: {error}",
   "@scanError": {
     "description": "Final scan failure message",
-    "placeholders": { "error": { "type": "String" } }
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
   },
   "saved": "Saved: {name}",
   "@saved": {
     "description": "Toast shown after a scan is stored",
-    "placeholders": { "name": { "type": "String" } }
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
   },
   "savedStatus": "Saved: {name} ({size} bytes)",
   "@savedStatus": {
     "description": "Status text after a scan is stored",
     "placeholders": {
-      "name": { "type": "String" },
-      "size": { "type": "String" }
+      "name": {
+        "type": "String"
+      },
+      "size": {
+        "type": "String"
+      }
     }
   },
   "deletedStatus": "Deleted \"{name}\".",
   "@deletedStatus": {
     "description": "Status text after a stored file is deleted",
-    "placeholders": { "name": { "type": "String" } }
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
   },
   "deleteError": "Delete error: {error}",
   "@deleteError": {
     "description": "File deletion failure message",
-    "placeholders": { "error": { "type": "String" } }
-  }
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsSheetTitle": "Settings",
+  "openSettings": "Show settings"
 }

@@ -68,7 +68,7 @@ class AppLocalizationsDe extends AppLocalizations {
   String get crop => 'AUSSCHNITT';
 
   @override
-  String get previewScan => 'Vorschau scannen';
+  String get previewScan => 'Vorschau';
 
   @override
   String get scan => 'Scannen';
@@ -87,7 +87,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get clickPreviewHint =>
-      'Klicken Sie auf „Vorschau scannen“, um das Bild zu laden';
+      'Tippen Sie auf „Vorschau“, um das Bild zu laden';
 
   @override
   String get noScansYet => 'Noch keine Scans.';
@@ -149,4 +149,10 @@ class AppLocalizationsDe extends AppLocalizations {
   String deleteError(String error) {
     return 'Lösch-Fehler: $error';
   }
+
+  @override
+  String get settingsSheetTitle => 'Einstellungen';
+
+  @override
+  String get openSettings => 'Einstellungen anzeigen';
 }

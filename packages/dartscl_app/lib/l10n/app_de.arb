@@ -19,12 +19,12 @@
   "documentFeederAdf": "Dokumenteneinzug (ADF)",
   "newPdf": "Neue PDF",
   "crop": "AUSSCHNITT",
-  "previewScan": "Vorschau scannen",
+  "previewScan": "Vorschau",
   "scan": "Scannen",
   "scanCropRegion": "Ausschnitt scannen",
   "statusLabel": "Status: {status}",
   "dragCropHint": "Ziehen Sie ein Rechteck auf dem Bild, um einen Ausschnitt auszuwählen",
-  "clickPreviewHint": "Klicken Sie auf „Vorschau scannen“, um das Bild zu laden",
+  "clickPreviewHint": "Tippen Sie auf „Vorschau“, um das Bild zu laden",
   "noScansYet": "Noch keine Scans.",
   "openInBrowser": "Im Browser öffnen",
   "download": "Herunterladen",
@@ -40,5 +40,7 @@
   "saved": "Gespeichert: {name}",
   "savedStatus": "Gespeichert: {name} ({size} Bytes)",
   "deletedStatus": "„{name}“ gelöscht.",
-  "deleteError": "Lösch-Fehler: {error}"
+  "deleteError": "Lösch-Fehler: {error}",
+  "settingsSheetTitle": "Einstellungen",
+  "openSettings": "Einstellungen anzeigen"
 }

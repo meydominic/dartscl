@@ -215,7 +215,7 @@ abstract class AppLocalizations {
   /// No description provided for @previewScan.
   ///
   /// In en, this message translates to:
-  /// **'Preview scan'**
+  /// **'Preview'**
   String get previewScan;
 
   /// No description provided for @scan.
@@ -245,7 +245,7 @@ abstract class AppLocalizations {
   /// No description provided for @clickPreviewHint.
   ///
   /// In en, this message translates to:
-  /// **'Click \"Preview scan\" to load the image'**
+  /// **'Click \"Preview\" to load the image'**
   String get clickPreviewHint;
 
   /// No description provided for @noScansYet.
@@ -343,6 +343,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Delete error: {error}'**
   String deleteError(String error);
+
+  /// No description provided for @settingsSheetTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Settings'**
+  String get settingsSheetTitle;
+
+  /// No description provided for @openSettings.
+  ///
+  /// In en, this message translates to:
+  /// **'Show settings'**
+  String get openSettings;
 }
 
 class _AppLocalizationsDelegate

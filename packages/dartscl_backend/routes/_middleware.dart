@@ -136,15 +136,26 @@ Middleware _staticFilesMiddleware() {
       if (relativePath == '/' || relativePath.isEmpty) {
         relativePath = '/index.html';
       }
-      // Strip leading slash and resolve relative to static base
+      // Strip leading slash, canonicalize away any `..`/`.` segments so a
+      // crafted request can never escape the static base directory.
       final filePath = relativePath.startsWith('/')
           ? relativePath.substring(1)
           : relativePath;
-      final file = File('${_staticBase.path}/$filePath');
+      final normalizedSegments = <String>[];
+      for (final segment in filePath.split('/')) {
+        if (segment.isEmpty || segment == '.') continue;
+        if (segment == '..') {
+          if (normalizedSegments.isNotEmpty) normalizedSegments.removeLast();
+          continue;
+        }
+        normalizedSegments.add(segment);
+      }
+      final safePath = normalizedSegments.join('/');
+      final file = File('${_staticBase.path}/$safePath');
 
       if (await file.exists()) {
         final extension =
-            filePath.contains('.') ? '.${filePath.split('.').last}' : '';
+            safePath.contains('.') ? '.${safePath.split('.').last}' : '';
         final contentType = _mimeTypes[extension] ?? 'application/octet-stream';
         final body = await file.readAsBytes();
 

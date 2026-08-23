@@ -305,11 +305,20 @@ class _CropOverlayPainter extends CustomPainter {
   final double handleSize;
   final Color primary;
 
+  /// Scrim drawn over the unselected image area. Deliberately theme-neutral:
+  /// it must dim arbitrary photo content regardless of light/dark mode.
+  final Color scrim;
+
+  /// Center dot color for the corner handles. White guarantees contrast on
+  /// top of the primary-colored handle regardless of the photo underneath.
+  final Color handleDot;
+
   _CropOverlayPainter({
     required this.selection,
     required this.handleSize,
     required this.primary,
-  });
+  })  : scrim = const Color(0x88000000),
+        handleDot = const Color(0xFFFFFFFF);
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -318,7 +327,7 @@ class _CropOverlayPainter extends CustomPainter {
     final sel = selection!;
 
     // Dim area outside selection.
-    final dimPaint = Paint()..color = const Color(0x88000000);
+    final dimPaint = Paint()..color = scrim;
     // Top
     canvas.drawRect(Rect.fromLTRB(0, 0, size.width, sel.top), dimPaint);
     // Bottom
@@ -367,11 +376,11 @@ class _CropOverlayPainter extends CustomPainter {
     ];
     for (final corner in corners) {
       canvas.drawCircle(corner, handleSize / 2, handlePaint);
-      // White inner dot for contrast.
+      // Inner dot for contrast against the primary handle.
       canvas.drawCircle(
         corner,
         handleSize / 4,
-        Paint()..color = const Color(0xFFFFFFFF),
+        Paint()..color = handleDot,
       );
     }
   }

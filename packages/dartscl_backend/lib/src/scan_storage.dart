@@ -50,6 +50,11 @@ class ScanStorage {
   final Map<String, ScannedFile> _index = {};
   final Uuid _uuid = const Uuid();
 
+  /// Tail of the serialization chain — every mutation appends itself here so
+  /// that concurrent requests execute one after another instead of racing on
+  /// [_index] across await gaps.
+  Future<void> _mutationLock = Future<void>.value();
+
   static const int _defaultMaxStorageBytes = 1024 * 1024 * 1024; // 1 GiB
   static const int _defaultRetentionDays = 365;
 
@@ -101,21 +106,27 @@ class ScanStorage {
   ///   (`512MB`, `2G`, `1073741824`) — see [parseStorageSize],
   /// - `SCAN_STORAGE_FULL_POLICY` (`evict-oldest` or `error`, default `error`),
   /// - `SCAN_RETENTION_DAYS` (default 365).
-  factory ScanStorage.fromEnvironment() {
+  ///
+  /// The [environment] map defaults to [Platform.environment] and can be
+  /// overridden in tests.
+  factory ScanStorage.fromEnvironment([
+    Map<String, String>? environment,
+  ]) {
+    final env = environment ?? Platform.environment;
     final baseDir = Directory(
-      Platform.environment['SCAN_STORAGE_PATH'] ?? './scans',
+      env['SCAN_STORAGE_PATH'] ?? './scans',
     );
-    final rawSize = Platform.environment['SCAN_MAX_STORAGE'];
+    final rawSize = env['SCAN_MAX_STORAGE'];
     final maxStorageBytes =
         (rawSize != null ? parseStorageSize(rawSize) : null) ??
             _defaultMaxStorageBytes;
     final fullPolicy =
-        Platform.environment['SCAN_STORAGE_FULL_POLICY']?.toLowerCase() ==
+        env['SCAN_STORAGE_FULL_POLICY']?.toLowerCase() ==
                 'evict-oldest'
             ? StorageFullPolicy.evictOldest
             : StorageFullPolicy.error;
     final retentionDays = int.tryParse(
-          Platform.environment['SCAN_RETENTION_DAYS'] ?? '',
+          env['SCAN_RETENTION_DAYS'] ?? '',
         ) ??
         _defaultRetentionDays;
     return ScanStorage(
@@ -148,16 +159,40 @@ class ScanStorage {
     return File(pathFor(id)).readAsBytes();
   }
 
+  /// Serializes a mutation so concurrent requests never interleave on
+  /// [_index]. Errors are swallowed here (they were already logged/handled by
+  /// the caller) so the lock chain never breaks for subsequent callers.
+  Future<T> _synchronized<T>(Future<T> Function() action) {
+    final result = _mutationLock.then((_) => action());
+    _mutationLock = result.then(
+      (_) {},
+      onError: (Object _) {},
+    );
+    return result;
+  }
+
   /// Stores scanned bytes as a new file, or replaces an existing file when
   /// [id] is provided (append to an existing PDF).
   ///
   /// Returns the metadata record (with a fresh id if none was given). Enforces
-  /// retention and the storage limit before writing.
+  /// retention and the storage limit before writing. Mutations are serialized
+  /// internally, so concurrent calls are safe.
+  ///
+  /// Throws [StorageFullException] when the limit is reached and
+  /// [StorageFullPolicy.error] is active.
   Future<ScannedFile> save(
     Uint8List bytes, {
     required String mimeType,
     String? id,
-  }) async {
+  }) {
+    return _synchronized(() => _saveUnsynchronized(bytes, mimeType, id));
+  }
+
+  Future<ScannedFile> _saveUnsynchronized(
+    Uint8List bytes,
+    String mimeType,
+    String? id,
+  ) async {
     await baseDir.create(recursive: true);
     _enforceRetentionSync();
 
@@ -196,8 +231,13 @@ class ScanStorage {
 
   /// Deletes a stored file and its index entry.
   ///
-  /// Returns `false` if the file does not exist.
-  Future<bool> delete(String id) async {
+  /// Returns `false` if the file does not exist. Mutations are serialized
+  /// internally, so concurrent calls are safe.
+  Future<bool> delete(String id) {
+    return _synchronized(() => _deleteUnsynchronized(id));
+  }
+
+  Future<bool> _deleteUnsynchronized(String id) async {
     final entry = _index[id];
     if (entry == null) return false;
     try {
@@ -260,7 +300,20 @@ class ScanStorage {
 
   File get _indexFile => File('${baseDir.path}/scans.json');
 
+  /// Matches the UUID format produced by `Uuid().v4()` (8-4-4-4-12 hex).
+  ///
+  /// Used as a defensive guard in [_filePath]: ids are interpolated into file
+  /// paths, so anything that is not a backend-generated UUID must never reach
+  /// the filesystem layer — even if a future caller forgets to check the
+  /// index first.
+  static final RegExp _uuidPattern = RegExp(
+    r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
+  );
+
   String _filePath(String id, String? mimeType) {
+    if (!_uuidPattern.hasMatch(id)) {
+      throw ArgumentError.value(id, 'id', 'Not a valid scan UUID');
+    }
     return '${baseDir.path}/$id${_extensionFor(mimeType)}';
   }
 
@@ -308,9 +361,13 @@ class ScanStorage {
   Future<void> _persistIndex() async {
     try {
       await baseDir.create(recursive: true);
-      await _indexFile.writeAsString(
+      // Write to a temp file first and rename, so a crash mid-write can never
+      // leave a truncated/corrupt scans.json behind.
+      final tempFile = File('${_indexFile.path}.tmp');
+      await tempFile.writeAsString(
         jsonEncode(_index.values.map((f) => f.toJson()).toList()),
       );
+      await tempFile.rename(_indexFile.path);
     } catch (e) {
       _log.warning('Failed to persist scan index: $e');
     }
@@ -319,9 +376,11 @@ class ScanStorage {
   void _persistIndexSync() {
     try {
       baseDir.createSync(recursive: true);
-      _indexFile.writeAsStringSync(
+      final tempFile = File('${_indexFile.path}.tmp');
+      tempFile.writeAsStringSync(
         jsonEncode(_index.values.map((f) => f.toJson()).toList()),
       );
+      tempFile.renameSync(_indexFile.path);
     } catch (e) {
       _log.warning('Failed to persist scan index: $e');
     }

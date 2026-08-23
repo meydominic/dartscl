@@ -10,6 +10,10 @@ import 'api_service.dart';
 import 'crop_overlay.dart';
 import 'l10n/app_localizations.dart';
 
+/// Corner radius shared by panels, cards, and the preview surface so they
+/// all use a consistent M3 "medium" shape.
+const double _panelRadius = 12.0;
+
 void main() {
   runApp(
     const ProviderScope(
@@ -51,9 +55,17 @@ class DartSclWebApp extends StatelessWidget {
     // Inter for body text, Outfit for large headings.
     final inter = GoogleFonts.interTextTheme(base.textTheme);
     final outfit = GoogleFonts.outfitTextTheme(base.textTheme);
-    final textTheme = inter.copyWith(titleLarge: outfit.titleLarge);
+    final textTheme = inter.copyWith(
+      titleLarge: outfit.titleLarge,
+      // Section labels: emphasized variant of the M3 label-small role so
+      // widgets never need inline fontWeight overrides.
+      labelSmall: inter.labelSmall?.copyWith(
+        fontWeight: FontWeight.w600,
+        letterSpacing: 1.1,
+      ),
+    );
 
-    final borderRadius = BorderRadius.circular(12);
+    final borderRadius = BorderRadius.circular(_panelRadius);
 
     return base.copyWith(
       textTheme: textTheme,
@@ -242,14 +254,13 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen>
     );
   }
 
-  /// Renders a styled section header label.
+  /// Renders a styled section header label (emphasis comes from the themed
+  /// `labelSmall` role — no inline font overrides here).
   Widget _sectionLabel(String text) {
     return Text(
       text,
       style: _textTheme.labelSmall?.copyWith(
-        fontWeight: FontWeight.w700,
         color: _scheme.onSurfaceVariant,
-        letterSpacing: 1.2,
       ),
     );
   }
@@ -479,7 +490,7 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen>
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         color: scheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(_panelRadius),
         border: Border.all(color: scheme.outlineVariant),
       ),
       child: Column(
@@ -492,9 +503,7 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen>
               Text(
                 l10n.crop,
                 style: _textTheme.labelSmall?.copyWith(
-                  fontWeight: FontWeight.w700,
                   color: scheme.onSurfaceVariant,
-                  letterSpacing: 1.0,
                 ),
               ),
               const Spacer(),
@@ -575,7 +584,7 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen>
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
               decoration: BoxDecoration(
                 color: scheme.surfaceContainerHigh,
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(_panelRadius),
               ),
               child: Row(
                 children: [
@@ -614,7 +623,7 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen>
                 child: Container(
                   decoration: BoxDecoration(
                     color: scheme.surfaceContainerHigh,
-                    borderRadius: BorderRadius.circular(12),
+                    borderRadius: BorderRadius.circular(_panelRadius),
                     border: Border.all(color: scheme.outlineVariant),
                   ),
                   clipBehavior: Clip.antiAlias,
@@ -723,12 +732,12 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen>
       );
 
       final result = await api.triggerFinalScan(config);
+      if (!mounted) return;
 
       if (isPdf) {
         // Pre-select the just-created/appended PDF for the next scan.
         setState(() => _targetPdfId = result.scanId);
       }
-
       final name = result.scanName ?? (isPdf ? 'scan.pdf' : 'scan.jpg');
       ref.read(scanStatusProvider.notifier).setStatus(
             l10n.savedStatus(name, result.bytes.length.toString()),
@@ -744,13 +753,14 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen>
       // Refresh the history so the new file appears immediately.
       ref.invalidate(scansProvider);
     } catch (e) {
+      if (!mounted) return;
       ref
           .read(scanStatusProvider.notifier)
           .setStatus(l10n.scanError(e.toString()));
     } finally {
       _spinnerController.stop();
       _spinnerController.reset();
-      setState(() => _isScanning = false);
+      if (mounted) setState(() => _isScanning = false);
     }
   }
 

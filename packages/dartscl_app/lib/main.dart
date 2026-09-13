@@ -901,8 +901,6 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen>
     setState(() => _isScanning = true);
     _spinnerController.repeat();
     ref.read(scanStatusProvider.notifier).setStatus(l10n.loadingPreview);
-    // Reset crop when loading a new preview
-    ref.read(cropRegionProvider.notifier).setCropRegion(null);
 
     try {
       final api = ref.read(apiServiceProvider);

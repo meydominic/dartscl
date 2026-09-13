@@ -27,6 +27,9 @@ class _CropOverlayState extends State<CropOverlay> {
   /// Pixel-level rect within the overlay coordinate system.
   Rect? _selection;
 
+  /// Selection captured before starting a drag, used to restore if drag was an accidental tap.
+  Rect? _previousSelection;
+
   /// Which handle the user is currently dragging (null = none).
   _DragHandle? _activeHandle;
 
@@ -36,13 +39,15 @@ class _CropOverlayState extends State<CropOverlay> {
   /// Selection rect captured at pan start.
   Rect _dragStartRect = Rect.zero;
 
+  /// Cached parent size to detect layout resize and recalculate relative coordinates.
+  Size? _lastParentSize;
+
   static const double _handleSize = 12.0;
   static const double _minSelectionSide = 20.0;
 
   @override
   void initState() {
     super.initState();
-    // Defer initial selection from initialCrop until layout is available.
   }
 
   @override
@@ -52,15 +57,52 @@ class _CropOverlayState extends State<CropOverlay> {
     // the sidebar). Reset the selection so the overlay rectangle disappears.
     if (oldWidget.initialCrop != null && widget.initialCrop == null) {
       setState(() => _selection = null);
+    } else if (widget.initialCrop != null &&
+        widget.initialCrop != oldWidget.initialCrop &&
+        _activeHandle == null) {
+      final lastSize = _lastParentSize;
+      if (lastSize != null && lastSize.width > 0 && lastSize.height > 0) {
+        setState(() {
+          _selection = Rect.fromLTWH(
+            widget.initialCrop!.xRatio * lastSize.width,
+            widget.initialCrop!.yRatio * lastSize.height,
+            widget.initialCrop!.widthRatio * lastSize.width,
+            widget.initialCrop!.heightRatio * lastSize.height,
+          );
+        });
+      }
     }
   }
 
+  /// Initializes or rescales the pixel selection rect from [CropRegion] ratios.
   void _initSelectionFromCrop(Size parentSize) {
-    // Never clear _selection here — it may have been set by the user via
-    // pan gestures. Only initialized from external initialCrop once.
-    if (_selection != null) return;
-    final crop = widget.initialCrop;
-    if (crop != null) {
+    if (parentSize.width <= 0 || parentSize.height <= 0) return;
+
+    if (_lastParentSize != parentSize) {
+      final crop = widget.initialCrop;
+      if (crop != null) {
+        _selection = Rect.fromLTWH(
+          crop.xRatio * parentSize.width,
+          crop.yRatio * parentSize.height,
+          crop.widthRatio * parentSize.width,
+          crop.heightRatio * parentSize.height,
+        );
+      } else if (_selection != null &&
+          _lastParentSize != null &&
+          _lastParentSize!.width > 0 &&
+          _lastParentSize!.height > 0) {
+        final scaleX = parentSize.width / _lastParentSize!.width;
+        final scaleY = parentSize.height / _lastParentSize!.height;
+        _selection = Rect.fromLTRB(
+          _selection!.left * scaleX,
+          _selection!.top * scaleY,
+          _selection!.right * scaleX,
+          _selection!.bottom * scaleY,
+        );
+      }
+      _lastParentSize = parentSize;
+    } else if (_selection == null && widget.initialCrop != null) {
+      final crop = widget.initialCrop!;
       _selection = Rect.fromLTWH(
         crop.xRatio * parentSize.width,
         crop.yRatio * parentSize.height,
@@ -70,9 +112,10 @@ class _CropOverlayState extends State<CropOverlay> {
     }
   }
 
+  /// Converts the current pixel selection rect to relative [CropRegion] ratios.
   CropRegion? _selectionToRegion(Size parentSize) {
     final sel = _selection;
-    if (sel == null || parentSize.width == 0 || parentSize.height == 0) {
+    if (sel == null || parentSize.width <= 0 || parentSize.height <= 0) {
       return null;
     }
     return CropRegion(
@@ -91,10 +134,10 @@ class _CropOverlayState extends State<CropOverlay> {
         _initSelectionFromCrop(parentSize);
 
         return GestureDetector(
+          behavior: HitTestBehavior.opaque,
           onPanStart: (details) => _onPanStart(details, parentSize),
           onPanUpdate: (details) => _onPanUpdate(details, parentSize),
           onPanEnd: (_) => _onPanEnd(parentSize),
-          onTapDown: (details) => _onTapDown(details, parentSize),
           child: CustomPaint(
             size: parentSize,
             painter: _CropOverlayPainter(
@@ -108,29 +151,16 @@ class _CropOverlayState extends State<CropOverlay> {
     );
   }
 
-  void _onTapDown(TapDownDetails details, Size parentSize) {
-    // If tapping outside existing selection, start a new one from scratch.
-    final pos = details.localPosition;
-    if (_selection != null && !_inflatedSelection().contains(pos)) {
-      setState(() {
-        _selection = Rect.fromCenter(
-          center: pos,
-          width: parentSize.width * 0.5,
-          height: parentSize.height * 0.5,
-        );
-        _selection = _clampRect(_selection!, parentSize);
-      });
-      widget.onCropChanged(_selectionToRegion(parentSize));
-    }
-  }
-
+  /// Handles pan gesture start by detecting handle hit, body drag, or new selection draw.
   void _onPanStart(DragStartDetails details, Size parentSize) {
     final pos = details.localPosition;
+    _previousSelection = _selection;
+
     if (_selection == null) {
-      // No selection yet – create one anchored at the tap point.
+      // No selection yet – start drawing a new one anchored at touch point.
       setState(() {
-        _selection = Rect.fromLTWH(pos.dx, pos.dy, 0, 0);
-        _activeHandle = _DragHandle.bottomRight;
+        _selection = Rect.fromPoints(pos, pos);
+        _activeHandle = _DragHandle.creating;
         _dragStartOffset = pos;
         _dragStartRect = _selection!;
       });
@@ -154,15 +184,16 @@ class _CropOverlayState extends State<CropOverlay> {
       return;
     }
 
-    // Tap outside – create new selection.
+    // Touch outside existing selection – start drawing a new selection.
     setState(() {
-      _selection = Rect.fromLTWH(pos.dx, pos.dy, 0, 0);
-      _activeHandle = _DragHandle.bottomRight;
+      _selection = Rect.fromPoints(pos, pos);
+      _activeHandle = _DragHandle.creating;
       _dragStartOffset = pos;
       _dragStartRect = _selection!;
     });
   }
 
+  /// Handles pan updates, allowing rectangle creation in any direction (up/down/left/right).
   void _onPanUpdate(DragUpdateDetails details, Size parentSize) {
     if (_activeHandle == null) return;
     final pos = details.localPosition;
@@ -170,6 +201,13 @@ class _CropOverlayState extends State<CropOverlay> {
 
     setState(() {
       switch (_activeHandle!) {
+        case _DragHandle.creating:
+          final left = math.min(_dragStartOffset.dx, pos.dx).clamp(0.0, parentSize.width);
+          final right = math.max(_dragStartOffset.dx, pos.dx).clamp(0.0, parentSize.width);
+          final top = math.min(_dragStartOffset.dy, pos.dy).clamp(0.0, parentSize.height);
+          final bottom = math.max(_dragStartOffset.dy, pos.dy).clamp(0.0, parentSize.height);
+          _selection = Rect.fromLTRB(left, top, right, bottom);
+          break;
         case _DragHandle.move:
           _selection = _clampRect(
             _dragStartRect.shift(delta),
@@ -216,23 +254,28 @@ class _CropOverlayState extends State<CropOverlay> {
     });
   }
 
+  /// Concludes pan gesture, validating minimum size or restoring previous selection if accidental tap.
   void _onPanEnd(Size parentSize) {
+    final wasCreating = _activeHandle == _DragHandle.creating;
     _activeHandle = null;
+
     // Discard tiny accidental selections.
     if (_selection != null &&
         (_selection!.width < _minSelectionSide ||
             _selection!.height < _minSelectionSide)) {
-      setState(() => _selection = null);
-      widget.onCropChanged(null);
+      if (wasCreating && _previousSelection != null) {
+        // Restore previous selection if the user just tapped outside accidentally
+        setState(() => _selection = _previousSelection);
+      } else {
+        setState(() => _selection = null);
+        widget.onCropChanged(null);
+      }
     } else {
       widget.onCropChanged(_selectionToRegion(parentSize));
     }
   }
 
-  Rect _inflatedSelection() {
-    return _selection!.inflate(_handleSize);
-  }
-
+  /// Hit-tests corner handles within a generous touch radius.
   _DragHandle? _hitTestHandle(Offset pos) {
     final sel = _selection!;
     final hs = _handleSize * 1.5; // generous hit area
@@ -244,6 +287,7 @@ class _CropOverlayState extends State<CropOverlay> {
     return null;
   }
 
+  /// Resizes the selection rect from an active corner handle while respecting constraints.
   Rect _resizeFromHandle(
     Rect startRect,
     Offset delta, {
@@ -285,6 +329,7 @@ class _CropOverlayState extends State<CropOverlay> {
     );
   }
 
+  /// Clamps a rectangle to stay within the boundaries of the preview container.
   Rect _clampRect(Rect r, Size parentSize) {
     // Guard against containers smaller than the minimum selection side —
     // clamp() throws an ArgumentError when lowerLimit > upperLimit.
@@ -298,7 +343,7 @@ class _CropOverlayState extends State<CropOverlay> {
   }
 }
 
-enum _DragHandle { move, topLeft, topRight, bottomLeft, bottomRight }
+enum _DragHandle { move, topLeft, topRight, bottomLeft, bottomRight, creating }
 
 class _CropOverlayPainter extends CustomPainter {
   final Rect? selection;

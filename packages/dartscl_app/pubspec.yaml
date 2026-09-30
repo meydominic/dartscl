@@ -17,10 +17,14 @@ dependencies:
   dartscl_protocol:
     path: ../dartscl_protocol
   flutter_riverpod: ^3.4.2
+  # Pinned below 9.0.0: 9.0.0 migrates to `material_ui`, which ships its own
+  # `TextTheme` class. Flutter 3.47.5's `package:flutter/material.dart` still
+  # uses its own TextTheme, so the types are incompatible. Unpin once the SDK
+  # ships material_ui itself.
   google_fonts: ^8.2.1
   http: ^1.2.0
   riverpod_annotation: ^4.0.6
-  cupertino_icons: ^1.0.8
+  cupertino_icons: ^2.0.0
   web: ^1.1.1
 
 dev_dependencies:

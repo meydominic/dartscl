@@ -4,7 +4,8 @@ services:
     container_name: dartscl
     # CRITICAL: Required for mDNS scanner discovery on the local network.
     # Without host networking, the container cannot see mDNS/Bonjour services
-    # advertised by the scanner.
+    # advertised by the scanner. Host networking is Linux-only — on Docker
+    # Desktop (macOS/Windows) mDNS discovery does not work in a container.
     network_mode: host
     environment:
       - PORT=8080
@@ -13,6 +14,12 @@ services:
       - SCAN_MAX_STORAGE=1GB                   # e.g. 512MB, 2G, or bare bytes
       - SCAN_STORAGE_FULL_POLICY=error         # error | evict-oldest
       - SCAN_RETENTION_DAYS=365
+      # Set to "true" only for UI development without hardware — a mock scan is
+      # a fabricated image, never a document.
+      - DARTSCL_USE_MOCK=false
+      # Allow-list for cross-origin API clients (comma separated). Empty by
+      # default: the UI is served from the same origin as the API.
+      - DARTSCL_CORS_ORIGINS=
     # Store scanned files persistently on the host
     volumes:
       - ./scans:/app/scans

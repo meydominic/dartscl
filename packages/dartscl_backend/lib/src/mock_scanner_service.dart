@@ -46,12 +46,18 @@ class MockScannerService {
   Uint8List get dummyImage => dummyJpeg;
 
   /// Returns hardcoded scanner capabilities for mock devices.
+  ///
+  /// Mirrors the shape of `EsclClient.fetchCapabilities` — including
+  /// `documentFormats`, which the UI needs to offer PDF output. The colour
+  /// modes are valid eSCL values, so mock scans exercise the same code paths
+  /// as real hardware.
   Map<String, dynamic> get dummyCapabilities => {
         'dpi': [75, 150, 300, 600],
-        'colorModes': ['RGB24', 'Grayscale8', 'B&W1'],
+        'colorModes': ['RGB24', 'Grayscale8', 'BlackAndWhite1'],
         'sources': ['platen', 'adf'],
         'maxWidth': 2159,
         'maxHeight': 2983,
+        'documentFormats': ['image/jpeg', 'application/pdf'],
       };
 }
 

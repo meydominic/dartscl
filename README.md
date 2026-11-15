@@ -134,8 +134,12 @@ development fallback. Override it explicitly with a dart-define if needed
 (see [Frontend configuration](#frontend-configuration)).
 
 > **Dev vs. prod static serving:** in development, the app runs on its own dev
-> server and talks to the backend via CORS (enabled). In production, the compiled
-> app is served by the backend itself from `static/` (see Docker below).
+> server and talks to the backend cross-origin. That requires an explicit
+> allow-list entry — the API sends no CORS headers by default, because a
+> wildcard would let any website read and delete your stored scans. Set
+> `DARTSCL_CORS_ORIGINS=http://localhost:<dev-port>` for that workflow. In
+> production, the compiled app is served by the backend itself from `static/`
+> (same origin, no CORS involved).
 
 ---
 
@@ -146,11 +150,12 @@ development fallback. Override it explicitly with a dart-define if needed
 | Variable                   | Default             | Description |
 |----------------------------|---------------------|-------------|
 | `PORT`                     | `8080`              | HTTP port the backend listens on |
-| `DARTSCL_USE_MOCK`         | `true`              | Mock scanner fallback when mDNS finds no devices. Set to `false` to disable (registry reports zero devices instead) |
-| `SCAN_STORAGE_PATH`        | `./scans`           | Directory where scanned files are persisted (in Docker: `/app/scans`) |
+| `DARTSCL_USE_MOCK`         | `false`             | Mock scanner fallback when mDNS finds no devices. Opt-in only (`true`): a mock scan is a fabricated 16×16 gray image, so it must never be mistaken for a real document |
+| `DARTSCL_CORS_ORIGINS`     | *(empty)*           | Comma-separated allow-list of origins for cross-origin API clients, e.g. `http://localhost:52341`. Empty sends no CORS headers at all (same-origin deployments need none) |
+| `SCAN_STORAGE_PATH`        | `./scans`           | Directory where scanned files are persisted (in Docker: `/app/scans`). Intermediate merge files go to `<path>/.tmp`, so no `/tmp` is required |
 | `SCAN_MAX_STORAGE`         | `1GB`               | Maximum total size of stored scans. Accepts a human-readable size (`512MB`, `2G`, `1GB`) or a bare byte count (`1073741824`); units are binary (1024-based) |
-| `SCAN_STORAGE_FULL_POLICY` | `error`             | What happens when the limit is reached: `error` (refuse the scan, HTTP 507) or `evict-oldest` (delete the oldest files until the new one fits) |
-| `SCAN_RETENTION_DAYS`      | `365`               | How long scanned files are kept; older files are deleted on startup and on every save |
+| `SCAN_STORAGE_FULL_POLICY` | `error`             | What happens when the limit is reached: `error` (refuse the scan, HTTP 507) or `evict-oldest` (delete the oldest files until the new one fits; still refuses a record larger than the limit) |
+| `SCAN_RETENTION_DAYS`      | `365`               | How long scanned files are kept; older files are deleted on startup and on every save. Values below 1 fall back to the default instead of deleting everything |
 
 ### Frontend configuration (build-time dart-define)
 
@@ -168,10 +173,17 @@ flutter build web --dart-define=DARTSCL_API_BASE_URL=https://scanner.example.com
 
 ### Notes
 
-- **Mock mode** only kicks in when mDNS discovers **no** real devices. If real
-  scanners are found, mocks are never used.
+- **Mock mode** only kicks in when mDNS discovers **no** real devices and only
+  when `DARTSCL_USE_MOCK=true` is set. If real scanners are found, mocks are
+  never used. A mock scan stores a fabricated placeholder image, so never
+  enable it where a scan is expected to be a document.
 - Mock scanner IDs start with `mock-` (`mock-1`, `mock-2`); real scanner IDs
   have the form `<ip>_<port>`, e.g. `192.168.1.152_443`.
+- **Security:** the API has no authentication and binds to all interfaces. It is
+  meant for a trusted LAN — anyone who can reach port 8080 can list, download
+  and delete stored scans and start scans. CORS is an allow-list (empty by
+  default) rather than a wildcard, so drive-by requests from websites the user
+  visits are blocked, but that is not a substitute for network isolation.
 - The mock scanner returns a programmatically generated 16×16 px gray JPEG —
   deliberately generated (not hardcoded) so that every mock-based code path
   (crop, PDF conversion) is fully exercisable.
@@ -443,20 +455,37 @@ Scanned files are written to `/app/scans` inside the container
 
 1. **Flutter builder** (`cirrusci/flutter:stable`) — `flutter build web --release`
 2. **Dart builder** (`dart:stable`) — installs `dart_frog_cli`, runs
-   `dart_frog build`, AOT-compiles the server to a standalone binary
-3. **Runtime** (`scratch`) — binary + static web assets only (~25 MB)
+   `dart_frog build`, then `dart build cli` to produce the server bundle
+   (binary + `pdf_oxide` native library required by `pdf_manipulator`)
+3. **Runtime** (`scratch`) — binary, native libraries + static web assets only
+
+> **Do not build the backend with `dart compile exe`.** `pdf_manipulator`
+> delivers its PDF engine (`pdf_oxide`) through the Dart build-hook protocol,
+> which `dart compile exe` ignores. Such a binary serves everything fine but
+> fails every PDF append with `No available native assets`. Use
+> `dart build cli` and ship the resulting `bundle/lib/` next to the binary.
 
 > Note: `.dockerignore` excludes `pubspec.lock`, so the image resolves
 > dependencies fresh at build time.
 
 To serve the web UI from a bare-metal backend (no Docker), generate `static/`
-manually:
+manually and build the server bundle:
 
 ```bash
 cd packages/dartscl_app && flutter build web --release
 rm -rf ../dartscl_backend/static
 cp -r build/web ../dartscl_backend/static
+
+cd ../dartscl_backend
+dart pub global activate dart_frog_cli
+dart_frog build                                  # -> build/bin/server.dart
+dart build cli --target=build/bin/server.dart -o build/cli   # -> build/cli/bundle/
+cd build/cli/bundle && ./bin/server              # serves API + UI on :8080
 ```
+
+Run the server from `packages/dartscl_backend` (or set an absolute
+`SCAN_STORAGE_PATH` and place `static/` next to the working directory) so the
+static-asset lookup finds the Flutter build.
 
 ---
 
@@ -469,9 +498,17 @@ cp -r build/web ../dartscl_backend/static
   not free enough space).
 - **Preview DPI is fixed at 100** in the frontend (safe across scanners,
   EPSON-verified); the preview does not use the user-selected DPI.
+- **One page per scan job**: the eSCL client retrieves the first document of a
+  job and cancels the job, so a multi-sheet ADF stack yields only its first
+  page. Multi-page PDFs are built by scanning one page at a time in append
+  mode.
 - **Single-user assumption**: the backend keeps one in-memory scanner/capability
-  cache and one job-URL registry; concurrent scans from multiple clients are not
-  serialized.
+  cache and one job-URL registry. Scans on the *same* device are serialized, but
+  there is no cross-client session state — two people driving the same scanner
+  see each other's scans.
+- **No authentication**: every endpoint is open to the LAN (see
+  [Security](#notes)). Put it behind a firewall rule or a reverse proxy that adds
+  auth if the network is not trusted.
 
 ---
 
@@ -481,7 +518,7 @@ cp -r build/web ../dartscl_backend/static
 |---------|--------------------|
 | `503 {"error": "scanner_busy"}` on scan | Scanner is warming up or busy (physically scanning). The backend already retries once with stale-job cleanup + 3 s cooldown; wait and retry. |
 | Persistent 409 from the scanner | Usually an unsupported DPI or a request quirk — see the compatibility table above. The backend logs the full 409 body/headers at WARNING level. |
-| No scanners found | mDNS needs the host network (Docker: `--network host`). Check that the scanner advertises eSCL (`_uscan`/`_uscans`). With no devices, mock mode kicks in unless `DARTSCL_USE_MOCK=false`. |
+| No scanners found | mDNS needs the host network (Docker: `--network host`). Check that the scanner advertises eSCL (`_uscan`/`_uscans`). Mocks are opt-in now: set `DARTSCL_USE_MOCK=true` to get placeholder scanners when no hardware is available. |
 | Capabilities empty / defaults shown | Capabilities pre-fetch failed at startup (scanner off/away); the UI falls back to defaults and the backend re-fetches on demand. |
 | Web test fails on the VM | Expected — run with `--platform chrome --run-skipped` (see Tests). |
 

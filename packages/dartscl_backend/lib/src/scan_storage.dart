@@ -117,18 +117,34 @@ class ScanStorage {
       env['SCAN_STORAGE_PATH'] ?? './scans',
     );
     final rawSize = env['SCAN_MAX_STORAGE'];
-    final maxStorageBytes =
-        (rawSize != null ? parseStorageSize(rawSize) : null) ??
-            _defaultMaxStorageBytes;
+    final parsedSize = rawSize != null ? parseStorageSize(rawSize) : null;
+    if (rawSize != null && parsedSize == null) {
+      // Fall back to the default, but say so — a typo here previously reduced
+      // the limit silently.
+      _log.warning(
+        'Invalid SCAN_MAX_STORAGE "$rawSize" (expected e.g. 512MB, 2G or '
+        'bytes) — using 1GB.',
+      );
+    }
+    final maxStorageBytes = parsedSize ?? _defaultMaxStorageBytes;
     final fullPolicy =
         env['SCAN_STORAGE_FULL_POLICY']?.toLowerCase() ==
                 'evict-oldest'
             ? StorageFullPolicy.evictOldest
             : StorageFullPolicy.error;
-    final retentionDays = int.tryParse(
-          env['SCAN_RETENTION_DAYS'] ?? '',
-        ) ??
-        _defaultRetentionDays;
+    final parsedRetention = int.tryParse(env['SCAN_RETENTION_DAYS'] ?? '');
+    if (parsedRetention != null && parsedRetention < 1) {
+      // A retention of 0 or less puts the cutoff in the future and would wipe
+      // every stored scan on the next save.
+      _log.warning(
+        'SCAN_RETENTION_DAYS must be at least 1 (got $parsedRetention) — '
+        'using $_defaultRetentionDays.',
+      );
+    }
+    final retentionDays =
+        (parsedRetention != null && parsedRetention >= 1)
+            ? parsedRetention
+            : _defaultRetentionDays;
     return ScanStorage(
       baseDir: baseDir,
       maxStorageBytes: maxStorageBytes,
@@ -153,6 +169,37 @@ class ScanStorage {
 
   /// Absolute path of a stored file. Used by the PDF pipeline to merge.
   String pathFor(String id) => _filePath(id, _index[id]?.mimeType);
+
+  /// Scratch directory for short-lived intermediate files (e.g. the merged PDF
+  /// of an append).
+  ///
+  /// It lives next to the stored scans rather than in the OS temp directory:
+  /// the runtime image is `scratch` (no `/tmp`), and keeping merges on the same
+  /// filesystem lets the result be renamed into place instead of copied.
+  Directory get tempDir => Directory('${baseDir.path}/.tmp');
+
+  /// Ensures [tempDir] exists and returns it.
+  Future<Directory> ensureTempDir() => tempDir.create(recursive: true);
+
+  /// Runs [action] while holding the storage mutation lock.
+  ///
+  /// Use this when a read-modify-write sequence must not interleave with
+  /// another mutation — appending a page reads the target PDF, merges and
+  /// writes it back, so a concurrent append would otherwise read the same
+  /// base version and drop one of the pages.
+  Future<T> runExclusive<T>(Future<T> Function() action) =>
+      _synchronized(action);
+
+  /// Saves without acquiring the lock.
+  ///
+  /// Only for callers that already hold it via [runExclusive]; calling it
+  /// outside a lock defeats the serialization and must not be done.
+  Future<ScannedFile> saveWithinLock(
+    Uint8List bytes, {
+    required String mimeType,
+    String? id,
+  }) =>
+      _saveUnsynchronized(bytes, mimeType, id);
 
   /// Reads a stored file's bytes. Throws [FileSystemException] if missing.
   Future<Uint8List> readBytes(String id) async {
@@ -209,7 +256,7 @@ class ScanStorage {
 
     final name = existing?.name ?? _defaultName(now, mimeType);
     final path = _filePath(fileId, mimeType);
-    await File(path).writeAsBytes(bytes);
+    await _writeFileAtomically(path, bytes);
 
     final record = ScannedFile(
       id: fileId,
@@ -272,7 +319,16 @@ class ScanStorage {
   }
 
   /// Ensures the storage limit can absorb [incomingBytes].
+  ///
+  /// Throws [StorageFullException] when even an empty store could not hold the
+  /// new record, or when eviction cannot free enough room. Without that check
+  /// the eviction loop used to delete the entire history and then write the
+  /// oversized file anyway, exceeding the configured limit.
   void _enforceLimitSync(int incomingBytes) {
+    if (incomingBytes > maxStorageBytes) {
+      throw StorageFullException(incomingBytes, maxStorageBytes);
+    }
+
     var total = _index.values.fold<int>(0, (sum, f) => sum + f.sizeBytes);
     if (total + incomingBytes <= maxStorageBytes) return;
 
@@ -282,16 +338,23 @@ class ScanStorage {
 
     // Evict oldest (by modifiedAt) until the new file fits.
     final ordered = list();
+    var evicted = false;
     for (final file in ordered.reversed) {
       if (total + incomingBytes <= maxStorageBytes) break;
       _deleteFileSync(file);
       _index.remove(file.id);
       total -= file.sizeBytes;
+      evicted = true;
       _log.info(
         'Storage full: evicted oldest scan ${file.id} ("${file.name}").',
       );
     }
-    _persistIndexSync();
+
+    if (evicted) _persistIndexSync();
+
+    if (total + incomingBytes > maxStorageBytes) {
+      throw StorageFullException(incomingBytes, maxStorageBytes);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -392,6 +455,24 @@ class ScanStorage {
       if (f.existsSync()) f.deleteSync();
     } catch (e) {
       _log.warning('Failed to delete scan file ${file.id}: $e');
+    }
+  }
+
+  /// Writes [bytes] to [path] via a temporary file and a rename.
+  ///
+  /// A concurrent reader (inline view, download) or a crash therefore never
+  /// observes a half-written scan file. Windows refuses the rename while
+  /// another handle keeps the target open, so that case falls back to an
+  /// in-place copy instead of failing the scan.
+  Future<void> _writeFileAtomically(String path, Uint8List bytes) async {
+    final temp = File('$path.tmp');
+    await temp.writeAsBytes(bytes, flush: true);
+    try {
+      await temp.rename(path);
+    } on FileSystemException catch (e) {
+      _log.warning('Atomic rename to $path failed ($e) — writing in place.');
+      await temp.copy(path);
+      await temp.delete();
     }
   }
 }

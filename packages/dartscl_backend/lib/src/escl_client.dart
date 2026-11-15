@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -62,11 +63,19 @@ class EsclClient {
       request.headers.set('User-Agent', 'curl/8.7.1');
       if (xmlBody != null) {
         request.headers.set('Content-Type', 'text/xml');
-        request.contentLength = xmlBody.length;
-        request.write(xmlBody);
+        // Content-Length must be the UTF-8 byte length. `String.length` counts
+        // UTF-16 code units, so any non-ASCII value would frame the body short
+        // and truncate the request.
+        final body = utf8.encode(xmlBody);
+        request.contentLength = body.length;
+        request.add(body);
       }
       final response = await request.close().timeout(timeout);
-      final responseBytes = await consolidateHttpClientResponseBytes(response);
+      // `close()` completes once the response head arrives; the body needs its
+      // own deadline, otherwise a scanner that stalls mid-body hangs the
+      // request (and the scan job) indefinitely.
+      final responseBytes =
+          await consolidateHttpClientResponseBytes(response).timeout(timeout);
       final headers = <String, String>{};
       response.headers.forEach((key, values) {
         headers[key.toLowerCase()] = values.join(', ');
@@ -155,7 +164,14 @@ class EsclClient {
   /// succeed. This method first attempts NextDocument (which may return
   /// the image or 404/503), then sends DELETE to fully cancel the job.
   /// This prevents 503 errors caused by stale jobs from previous sessions.
-  Future<void> cancelStaleJobs(ScannerDevice device) async {
+  ///
+  /// The whole cleanup is bounded by [totalBudget]: stale-job draining used to
+  /// allow 30 x 31 s per job, which could hold a scan request (and, since scans
+  /// are serialized per device, that device's queue) for many minutes.
+  Future<void> cancelStaleJobs(
+    ScannerDevice device, {
+    Duration totalBudget = const Duration(minutes: 1),
+  }) async {
     final processingUris = await fetchProcessingJobUris(device);
     if (processingUris.isEmpty) {
       _log.fine('No stale Processing jobs found on scanner.');
@@ -164,7 +180,18 @@ class EsclClient {
     _log.info(
       'Found ${processingUris.length} stale Processing job(s). Cancelling...',
     );
+
+    final deadline = DateTime.now().add(totalBudget);
     for (final uri in processingUris) {
+      if (DateTime.now().isAfter(deadline)) {
+        _log.warning(
+          'Stale job cleanup budget exhausted — cancelling the remaining jobs '
+          'without draining them.',
+        );
+        // DELETE alone is still worth trying; some scanners accept it.
+        await _cancelJobUrl(_buildJobUrl(device, uri));
+        continue;
+      }
       final fullUrl = _buildJobUrl(device, uri);
       // EPSON requires consuming NextDocument before DELETE succeeds.
       // Attempt to consume any remaining document (image data is discarded).
@@ -399,8 +426,50 @@ class EsclClient {
   /// Uses raw `dart:io` [HttpClient] to handle the eSCL POST, as some
   /// scanner HTTPS implementations are incompatible with the `package:http`
   /// IOClient wrapper and return empty 409 responses for valid requests.
+  ///
+  /// Scans for the same device are serialized: each job creation first cancels
+  /// the previous job of that device, so two concurrent scans would otherwise
+  /// cancel each other and both time out.
   Future<Uint8List> executeScanJob(
-      ScannerDevice device, ScanJobConfig config) async {
+    ScannerDevice device,
+    ScanJobConfig config,
+  ) {
+    return _serializedPerDevice(
+      device.id,
+      () => _executeScanJob(device, config),
+    );
+  }
+
+  /// Tail of the per-device scan chain, keyed by scanner id.
+  ///
+  /// The chain never carries an error: each entry is completed without a value,
+  /// so one failed scan cannot poison the queue for the next one.
+  final Map<String, Future<void>> _deviceLocks = {};
+
+  /// Runs [action] after every previously queued action for [deviceId].
+  Future<T> _serializedPerDevice<T>(
+    String deviceId,
+    Future<T> Function() action,
+  ) {
+    final previous = _deviceLocks[deviceId] ?? Future<void>.value();
+    final gate = Completer<void>();
+    _deviceLocks[deviceId] = gate.future;
+
+    return previous
+        .then((_) => action())
+        .whenComplete(() {
+      gate.complete();
+      if (identical(_deviceLocks[deviceId], gate.future)) {
+        _deviceLocks.remove(deviceId);
+      }
+    });
+  }
+
+  /// Performs one scan job for [device]; see [executeScanJob].
+  Future<Uint8List> _executeScanJob(
+    ScannerDevice device,
+    ScanJobConfig config,
+  ) async {
     final uri = Uri.parse(_buildUrl(device, '/ScanJobs'));
     final xmlPayload = _buildScanJobXml(config);
 
@@ -496,6 +565,28 @@ class EsclClient {
           '${retryBodyStr.length > 500 ? retryBodyStr.substring(0, 500) : retryBodyStr}',
           statusCode: 409,
           isBusy: true,
+        );
+      }
+
+      // A retried request can fail in other ways (busy on EPSON, rejected
+      // settings, auth). Map those explicitly — forwarding them to
+      // _handleJobResponse would surface as a misleading "no Location header".
+      if (retryStatus == 503) {
+        throw EsclException(
+          'Scanner is busy',
+          statusCode: 503,
+          isBusy: true,
+        );
+      }
+      if (retryStatus != 200 && retryStatus != 201) {
+        final retryBodyStr = utf8.decode(retryBytes, allowMalformed: true);
+        _log.warning(
+          'Retried scan job failed (HTTP $retryStatus): $retryBodyStr',
+        );
+        throw EsclException(
+          'Failed to create scan job (HTTP $retryStatus): '
+          '${retryBodyStr.length > 500 ? retryBodyStr.substring(0, 500) : retryBodyStr}',
+          statusCode: retryStatus,
         );
       }
 
@@ -612,7 +703,14 @@ class EsclClient {
 
     _log.info('Polling scanned document from $nextDocUrl');
 
-    for (var attempt = 0; attempt < 60; attempt++) {
+    // One scan must never occupy the server for ~30 minutes (the previous
+    // 60 x 31 s worst case). The budget covers the whole polling phase; on
+    // exhaustion the job is cancelled on the scanner, otherwise it stays in
+    // "Processing" and blocks every later scan with HTTP 503.
+    const pollBudget = Duration(minutes: 3);
+    final pollStartedAt = DateTime.now();
+
+    while (DateTime.now().difference(pollStartedAt) < pollBudget) {
       final getResponse = await _rawRequest(
         'GET',
         Uri.parse(nextDocUrl),
@@ -625,8 +723,7 @@ class EsclClient {
 
         final result = getResponse.body;
         _log.info(
-          'Scan job completed successfully (${result.length} bytes, '
-          '$attempt retries)',
+          'Scan job completed successfully (${result.length} bytes).',
         );
 
         // EPSON scanners keep the job in "Processing" state even after
@@ -639,7 +736,7 @@ class EsclClient {
       }
 
       _log.fine(
-        'NextDocument attempt $attempt: HTTP ${getResponse.statusCode}',
+        'NextDocument attempt: HTTP ${getResponse.statusCode}',
       );
 
       if (getResponse.statusCode == 404 || getResponse.statusCode == 503) {
@@ -648,15 +745,22 @@ class EsclClient {
         continue;
       }
 
-      // Unexpected status — fail immediately
+      // Unexpected status — cancel the job before failing so the scanner is
+      // not left in a state that blocks the next scan.
+      _lastJobUrls.remove(device.id);
+      await _cancelJobUrl(jobUrl);
       throw EsclException(
         'Failed to retrieve scanned document (HTTP ${getResponse.statusCode})',
         statusCode: getResponse.statusCode,
       );
     }
 
+    _lastJobUrls.remove(device.id);
+    await _cancelJobUrl(jobUrl);
     throw EsclException(
-      'NextDocument did not return image within 60 polling attempts',
+      'Scanner did not deliver the document within '
+      '${pollBudget.inMinutes} minutes — the scan job was cancelled.',
+      statusCode: 504,
     );
   }
 

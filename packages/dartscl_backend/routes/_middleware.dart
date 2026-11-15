@@ -131,57 +131,53 @@ Middleware _staticFilesMiddleware() {
         return handler(context);
       }
 
-      // Resolve the requested file path
-      var relativePath = requestPath;
-      if (relativePath == '/' || relativePath.isEmpty) {
-        relativePath = '/index.html';
-      }
-      // Strip leading slash, canonicalize away any `..`/`.` segments so a
-      // crafted request can never escape the static base directory.
-      final filePath = relativePath.startsWith('/')
-          ? relativePath.substring(1)
-          : relativePath;
-      final normalizedSegments = <String>[];
-      for (final segment in filePath.split('/')) {
-        if (segment.isEmpty || segment == '.') continue;
-        if (segment == '..') {
-          if (normalizedSegments.isNotEmpty) normalizedSegments.removeLast();
-          continue;
+      // `pathSegments` are percent-decoded, so asset names containing escaped
+      // characters resolve correctly (the raw path search missed them and fell
+      // through to the SPA fallback).
+      //
+      // A decoded segment can still contain separators (`%2f`, `%5c`), so each
+      // segment is split again and normalized part by part. Without that,
+      // `GET /..%2f..%2fetc%2fpasswd` arrives as the single segment
+      // `../../etc/passwd` and would escape the static root.
+      final segments = <String>[];
+      if (request.uri.pathSegments.isEmpty) {
+        segments.add('index.html');
+      } else {
+        for (final rawSegment in request.uri.pathSegments) {
+          for (final part in rawSegment.split(RegExp(r'[/\\]'))) {
+            if (part.isEmpty || part == '.') continue;
+            if (part == '..') {
+              // Never let a request climb above the static root.
+              if (segments.isEmpty) {
+                return Response(statusCode: 404);
+              }
+              segments.removeLast();
+              continue;
+            }
+            segments.add(part);
+          }
         }
-        normalizedSegments.add(segment);
       }
-      final safePath = normalizedSegments.join('/');
-      final file = File('${_staticBase.path}/$safePath');
 
-      if (await file.exists()) {
-        final extension =
-            safePath.contains('.') ? '.${safePath.split('.').last}' : '';
-        final contentType = _mimeTypes[extension] ?? 'application/octet-stream';
-        final body = await file.readAsBytes();
-
-        return Response.bytes(
-          body: body,
-          headers: {
-            'Content-Type': contentType,
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
-          },
+      final safePath = segments.join('/');
+      if (safePath.isNotEmpty) {
+        final response = await _serveStaticFile(
+          File('${_staticBase.path}/$safePath'),
+          safePath,
+          request,
         );
+        if (response != null) return response;
       }
 
       // If the file doesn't exist but isn't an API route, serve index.html
       // for client-side routing (Flutter Web SPA fallback).
       if (!requestPath.contains('.')) {
-        final indexFile = File('${_staticBase.path}/index.html');
-        if (await indexFile.exists()) {
-          final body = await indexFile.readAsBytes();
-          return Response.bytes(
-            body: body,
-            headers: {
-              'Content-Type': 'text/html; charset=utf-8',
-              'Cache-Control': 'no-cache, no-store, must-revalidate',
-            },
-          );
-        }
+        final response = await _serveStaticFile(
+          File('${_staticBase.path}/index.html'),
+          'index.html',
+          request,
+        );
+        if (response != null) return response;
       }
 
       return handler(context);
@@ -189,29 +185,120 @@ Middleware _staticFilesMiddleware() {
   };
 }
 
+/// Serves [file] when it exists, honouring conditional requests, and returns
+/// `null` when it is missing.
+///
+/// The `ETag` is derived from size and modification time, so the browser
+/// revalidates with a cheap 304 instead of re-downloading several megabytes of
+/// bundle on every page load — while a rebuilt app is still picked up at once
+/// (`Cache-Control: no-cache`, not a long max-age).
+Future<Response?> _serveStaticFile(
+  File file,
+  String safePath,
+  Request request,
+) async {
+  if (!await file.exists()) return null;
+
+  final extension =
+      safePath.contains('.') ? '.${safePath.split('.').last}' : '';
+  final contentType = _mimeTypes[extension] ?? 'application/octet-stream';
+  final stat = await file.stat();
+  // The path is part of the validator: two assets can share size and mtime.
+  final etag = '"${safePath.hashCode}-${stat.size}-'
+      '${stat.modified.millisecondsSinceEpoch}"';
+  final headers = <String, String>{
+    'Content-Type': contentType,
+    'Cache-Control': 'no-cache',
+    'ETag': etag,
+    'Last-Modified': HttpDate.format(stat.modified.toUtc()),
+  };
+
+  final ifNoneMatch = request.headers['if-none-match'];
+  if (ifNoneMatch != null && _matchesEtag(ifNoneMatch, etag)) {
+    return Response(statusCode: 304, headers: headers);
+  }
+
+  return Response.bytes(body: await file.readAsBytes(), headers: headers);
+}
+
+/// Returns `true` when the `If-None-Match` header value contains [etag].
+///
+/// Browsers send weak validators (`W/"..."`) and comma-separated lists, so a
+/// plain `==` comparison would miss valid revalidations and resend the body.
+bool _matchesEtag(String headerValue, String etag) {
+  for (final raw in headerValue.split(',')) {
+    final candidate = raw.trim();
+    if (candidate == etag) return true;
+    if (candidate.startsWith('W/') && candidate.substring(2) == etag) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/// Cross-origin hosts allowed to call the API, from `DARTSCL_CORS_ORIGINS`
+/// (comma-separated, e.g. `http://localhost:3000`).
+///
+/// Empty by default: the production deployment serves the UI and the API from
+/// the same origin, where no CORS header is needed. A wildcard is never sent —
+/// it would let any website the user visits read, download and delete every
+/// stored scan on the LAN.
+final Set<String> _allowedCorsOrigins = {
+  for (final origin in (Platform.environment['DARTSCL_CORS_ORIGINS'] ?? '')
+      .split(','))
+    if (origin.trim().isNotEmpty) origin.trim(),
+};
+
+/// HTTP methods advertised to allowed cross-origin clients.
+const String _corsMethods = 'GET, POST, DELETE, OPTIONS';
+
+/// Request headers advertised to allowed cross-origin clients.
+const String _corsHeaders = 'Content-Type, Authorization';
+
+/// Response headers a cross-origin client may read.
+const String _exposedHeaders =
+    'X-Scan-Id, X-Scan-Name, Content-Disposition';
+
 Middleware _corsMiddleware() {
   return (handler) {
     return (context) async {
-      final request = context.request;
-      if (request.method == HttpMethod.options) {
+      final origin = context.request.headers['origin'];
+      final allowed = origin != null && _allowedCorsOrigins.contains(origin);
+
+      if (context.request.method == HttpMethod.options) {
+        // A preflight from an origin that is not allow-listed must not receive
+        // CORS headers — the browser then blocks the actual request.
         return Response(
           statusCode: 204,
           headers: {
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-            'Access-Control-Max-Age': '86400',
+            'Vary': 'Origin',
+            if (allowed) 'Access-Control-Allow-Origin': origin,
+            if (allowed) 'Access-Control-Allow-Methods': _corsMethods,
+            if (allowed) 'Access-Control-Allow-Headers': _corsHeaders,
+            if (allowed) 'Access-Control-Max-Age': '86400',
           },
         );
       }
 
       final response = await handler(context);
+      if (!allowed) {
+        // `Vary` must be sent even without CORS headers, so a shared cache
+        // cannot hand this response to an allow-listed origin later.
+        return response.copyWith(
+          headers: {...response.headers, 'Vary': 'Origin'},
+        );
+      }
+
       return response.copyWith(
         headers: {
           ...response.headers,
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+          'Access-Control-Allow-Origin': origin,
+          'Access-Control-Allow-Methods': _corsMethods,
+          'Access-Control-Allow-Headers': _corsHeaders,
+          // Without this the browser hides X-Scan-Id/X-Scan-Name from a
+          // cross-origin client, which silently breaks the append chain.
+          'Access-Control-Expose-Headers': _exposedHeaders,
+          'Vary': 'Origin',
         },
       );
     };

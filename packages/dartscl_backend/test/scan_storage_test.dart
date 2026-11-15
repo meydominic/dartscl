@@ -261,6 +261,59 @@ void main() {
       expect(total, lessThanOrEqualTo(1000));
     });
 
+    test('a record larger than the limit is rejected without evicting history',
+        () async {
+      final storage = buildStorage(maxBytes: 64);
+      await storage.save(
+        Uint8List.fromList(List.filled(40, 1)),
+        mimeType: 'image/jpeg',
+      );
+
+      await expectLater(
+        storage.save(
+          Uint8List.fromList(List.filled(80, 2)),
+          mimeType: 'image/jpeg',
+        ),
+        throwsA(isA<StorageFullException>()),
+      );
+
+      // A single oversized scan used to delete the whole history and then be
+      // written anyway, exceeding the configured limit.
+      expect(storage.list(), hasLength(1));
+    });
+
+    test('runExclusive + saveWithinLock replace a record under one lock',
+        () async {
+      final storage = buildStorage();
+      final first = await storage.save(
+        Uint8List.fromList(List.filled(10, 1)),
+        mimeType: 'application/pdf',
+      );
+
+      final replaced = await storage.runExclusive(
+        () => storage.saveWithinLock(
+          Uint8List.fromList(List.filled(20, 2)),
+          mimeType: 'application/pdf',
+          id: first.id,
+        ),
+      );
+
+      expect(replaced.id, equals(first.id));
+      expect(replaced.name, equals(first.name));
+      expect(
+        await File(storage.pathFor(first.id)).length(),
+        equals(20),
+      );
+    });
+
+    test('tempDir is created inside the storage directory', () async {
+      final storage = buildStorage();
+      final dir = await storage.ensureTempDir();
+
+      expect(dir.existsSync(), isTrue);
+      expect(dir.path, startsWith(storage.baseDir.path));
+    });
+
     test('_filePath rejects non-UUID ids defensively', () {
       final storage = buildStorage();
       expect(

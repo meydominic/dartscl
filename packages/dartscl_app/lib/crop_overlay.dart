@@ -1,7 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:dartscl_protocol/dartscl_protocol.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 /// Interactive crop overlay that renders a draggable and resizable selection
 /// box on top of a preview image. The selection is expressed as relative

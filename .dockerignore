@@ -1,9 +1,8 @@
 # Dart/Flutter
-.dart_tool/
+**/.dart_tool/
 .pub-cache/
 .packages
-build/
-pubspec.lock
+**/build/
 *.iml
 
 # Flutter
@@ -33,6 +32,13 @@ pubspec.lock
 *.temp
 repomix-*
 .hermes-temp/
+**/.tmp/
+
+# Runtime data: never bake stored scans into an image
+**/scans/
+
+# Built web assets are produced inside the build (stage 2), never copied in
+**/static/
 
 # Git
 .git/

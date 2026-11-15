@@ -8,8 +8,8 @@
 .dart_tool/
 .packages
 build/
-# If you're building an application, you may want to check-in your pubspec.lock
-pubspec.lock
+# `pubspec.lock` IS committed: this is an application workspace, and the Docker
+# build resolves from the lockfile so an image is reproducible from a commit.
 
 # Repomix tool artifacts (source dump + config)
 repomix*

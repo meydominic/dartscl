@@ -1,8 +1,9 @@
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:web/web.dart' as web;
 import 'package:dartscl_protocol/dartscl_protocol.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 
@@ -312,6 +313,27 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen>
     );
   }
 
+  /// Placeholder shown when the preview bytes cannot be decoded (e.g. the
+  /// backend returned an error page with HTTP 200 — an `ImageCodecException`
+  /// without an `errorBuilder` would otherwise break the whole widget tree).
+  Widget _buildImageError() {
+    final scheme = _scheme;
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.broken_image_outlined, size: 56, color: scheme.error),
+          const SizedBox(height: 12),
+          Text(
+            _l10n.previewError('invalid image'),
+            textAlign: TextAlign.center,
+            style: _textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// Preview card for the compact layout: status line plus image viewer.
   Widget _buildCompactPreview({
     required Uint8List? previewBytes,
@@ -320,6 +342,8 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen>
   }) {
     final l10n = _l10n;
     final scheme = _scheme;
+    // The overlay must sit on the painted page, not on a letterboxed box.
+    final aspectRatio = ref.watch(previewAspectProvider) ?? 4 / 3;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -357,8 +381,12 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen>
                   fit: StackFit.passthrough,
                   children: [
                     AspectRatio(
-                      aspectRatio: 4 / 3,
-                      child: Image.memory(previewBytes, fit: BoxFit.contain),
+                      aspectRatio: aspectRatio,
+                      child: Image.memory(
+                        previewBytes,
+                        fit: BoxFit.contain,
+                        errorBuilder: (_, __, ___) => _buildImageError(),
+                      ),
                     ),
                     Positioned.fill(
                       child: CropOverlay(
@@ -453,27 +481,39 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _sectionLabel(l10n.scannerSelection),
-          const SizedBox(height: 10),
-          _buildScannerSelector(scannersAsync, selectedScannerId),
-          const SizedBox(height: 24),
-          _sectionLabel(l10n.settings),
-          const SizedBox(height: 12),
-          _buildCapabilitiesSettings(capsAsync),
-          const SizedBox(height: 12),
-          _buildDocumentFormatDropdown(capsAsync),
-          const SizedBox(height: 12),
-          _buildSourceDropdown(),
-          // Only show append-target when PDF output is selected
-          if (_documentFormat == 'application/pdf') ...[
-            const SizedBox(height: 12),
-            _buildPdfTargetDropdown(),
-          ],
-          if (cropRegion != null) ...[
-            const SizedBox(height: 16),
-            _buildCropInfo(cropRegion),
-          ],
-          const Spacer(),
+          // Scrollable settings + fixed action footer: the sidebar content is
+          // taller than a 768 px browser once the crop readout appears, and a
+          // bare Column with a Spacer overflows there.
+          Expanded(
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _sectionLabel(l10n.scannerSelection),
+                  const SizedBox(height: 10),
+                  _buildScannerSelector(scannersAsync, selectedScannerId),
+                  const SizedBox(height: 24),
+                  _sectionLabel(l10n.settings),
+                  const SizedBox(height: 12),
+                  _buildCapabilitiesSettings(capsAsync),
+                  const SizedBox(height: 12),
+                  _buildDocumentFormatDropdown(capsAsync),
+                  const SizedBox(height: 12),
+                  _buildSourceDropdown(),
+                  // Only show append-target when PDF output is selected
+                  if (_documentFormat == 'application/pdf') ...[
+                    const SizedBox(height: 12),
+                    _buildPdfTargetDropdown(),
+                  ],
+                  if (cropRegion != null) ...[
+                    const SizedBox(height: 16),
+                    _buildCropInfo(cropRegion),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
           _buildActionButtons(selectedScannerId, cropRegion),
         ],
       ),
@@ -510,15 +550,21 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen>
           });
         }
         final selectedId = selectedScannerId ?? scanners.first.id;
+        // A re-discovery can change ids (they are `ip_port`), so the stored
+        // selection may no longer exist. Resolve it before handing it to the
+        // dropdown — Flutter asserts when `initialValue` has no matching item.
+        final effectiveId = scanners.any((s) => s.id == selectedId)
+            ? selectedId
+            : scanners.first.id;
         final selected = scanners.firstWhere(
-          (s) => s.id == selectedId,
+          (s) => s.id == effectiveId,
           orElse: () => scanners.first,
         );
         return Tooltip(
           message: '${selected.name} (${selected.ip})',
           waitDuration: const Duration(milliseconds: 400),
           child: DropdownButtonFormField<String>(
-            initialValue: selectedId,
+            initialValue: effectiveId,
             isExpanded: true,
             items: scanners.map((s) {
               return DropdownMenuItem(
@@ -529,6 +575,11 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen>
             }).toList(),
             onChanged: (val) {
               ref.read(selectedScannerIdProvider.notifier).setScannerId(val);
+              // A preview belongs to the scanner that produced it; keeping it
+              // would crop/scan a page from the previous device.
+              ref.read(previewImageProvider.notifier).setImage(null);
+              ref.read(previewAspectProvider.notifier).setAspect(null);
+              ref.read(cropRegionProvider.notifier).setCropRegion(null);
             },
           ),
         );
@@ -860,6 +911,7 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen>
                             Image.memory(
                               previewBytes,
                               fit: BoxFit.contain,
+                              errorBuilder: (_, __, ___) => _buildImageError(),
                             ),
                             Positioned.fill(
                               child: CropOverlay(
@@ -895,9 +947,48 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen>
     );
   }
 
+  /// Returns the settings that will actually be sent to the scanner.
+  ///
+  /// The dropdowns fall back to the first supported value when the stored
+  /// selection is not offered by the current scanner; using a separate value in
+  /// the request made the UI show e.g. 75 DPI while 300 was scanned. The same
+  /// reconciliation applies to the output format, whose dropdown disappears
+  /// entirely for JPEG-only scanners — a stale `application/pdf` would then be
+  /// sent while no control is left to change it.
+  ({int dpi, String colorMode, String documentFormat}) _effectiveSettingsFor(
+    Map<String, dynamic>? caps, {
+    int? previewDpi,
+  }) {
+    final dpis = (caps?['dpi'] as List<dynamic>?)?.cast<int>();
+    final colorModes = (caps?['colorModes'] as List<dynamic>?)?.cast<String>();
+    final formats =
+        (caps?['documentFormats'] as List<dynamic>?)?.cast<String>();
+    final requestedDpi = previewDpi ?? _dpi;
+    return (
+      dpi: (dpis != null && dpis.isNotEmpty && !dpis.contains(requestedDpi))
+          ? dpis.first
+          : requestedDpi,
+      colorMode: (colorModes != null &&
+              colorModes.isNotEmpty &&
+              !colorModes.contains(_colorMode))
+          ? colorModes.first
+          : _colorMode,
+      documentFormat: (formats != null &&
+              formats.isNotEmpty &&
+              !formats.contains(_documentFormat))
+          ? formats.first
+          : _documentFormat,
+    );
+  }
+
   /// Triggers a preview scan at low resolution (100 DPI).
   Future<void> _triggerPreviewScan(String scannerId) async {
     final l10n = _l10n;
+    final caps = ref.read(capabilitiesProvider).value;
+    // Previews are always 100 DPI, unless the scanner does not offer it.
+    final settings = _effectiveSettingsFor(caps, previewDpi: 100);
+    final previewDpi = settings.dpi;
+
     setState(() => _isScanning = true);
     _spinnerController.repeat();
     ref.read(scanStatusProvider.notifier).setStatus(l10n.loadingPreview);
@@ -908,30 +999,49 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen>
         scannerId: scannerId,
         intent: ScanIntent.preview,
         source: _source,
-        dpi: 100,
-        colorMode: _colorMode,
+        dpi: previewDpi,
+        colorMode: settings.colorMode,
         targetMode: TargetMode.newPdf,
-        documentFormat: _documentFormat,
+        documentFormat: settings.documentFormat,
       );
 
       final bytes = await api.requestPreviewScan(config);
+      if (!mounted) return;
+
       ref.read(previewImageProvider.notifier).setImage(bytes);
+
+      // Decode the pixel size once so the crop overlay can be laid out on the
+      // painted page instead of a fixed 4:3 box.
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      final aspectRatio = frame.image.width / frame.image.height;
+      frame.image.dispose();
+      codec.dispose();
+      if (!mounted) return;
+      ref.read(previewAspectProvider.notifier).setAspect(aspectRatio);
+
       ref.read(scanStatusProvider.notifier).setStatus(l10n.previewReady);
     } catch (e) {
+      if (!mounted) return;
       ref
           .read(scanStatusProvider.notifier)
           .setStatus(l10n.previewError(e.toString()));
     } finally {
-      _spinnerController.stop();
-      _spinnerController.reset();
-      setState(() => _isScanning = false);
+      if (mounted) {
+        _spinnerController.stop();
+        _spinnerController.reset();
+        setState(() => _isScanning = false);
+      }
     }
   }
 
   /// Triggers a final scan at the configured DPI.
   Future<void> _triggerFinalScan(String scannerId) async {
     final l10n = _l10n;
-    final isPdf = _documentFormat == 'application/pdf';
+    final settings = _effectiveSettingsFor(
+      ref.read(capabilitiesProvider).value,
+    );
+    final isPdf = settings.documentFormat == 'application/pdf';
     final appendTarget = isPdf ? _targetPdfId : null;
 
     setState(() => _isScanning = true);
@@ -946,13 +1056,13 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen>
         scannerId: scannerId,
         intent: ScanIntent.finalScan,
         source: _source,
-        dpi: _dpi,
-        colorMode: _colorMode,
+        dpi: settings.dpi,
+        colorMode: settings.colorMode,
         crop: crop,
         targetMode:
             appendTarget == null ? TargetMode.newPdf : TargetMode.append,
         targetPdfId: appendTarget,
-        documentFormat: _documentFormat,
+        documentFormat: settings.documentFormat,
       );
 
       final result = await api.triggerFinalScan(config);
@@ -978,13 +1088,24 @@ class _MainScanScreenState extends ConsumerState<MainScanScreen>
       ref.invalidate(scansProvider);
     } catch (e) {
       if (!mounted) return;
-      ref
-          .read(scanStatusProvider.notifier)
-          .setStatus(l10n.scanError(e.toString()));
+      final message = l10n.scanError(e.toString());
+      ref.read(scanStatusProvider.notifier).setStatus(message);
+      // Surface the failure loudly: a silent status-line update is easy to
+      // miss, which makes a lost page look like a successful scan.
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: _scheme.error,
+        ),
+      );
     } finally {
-      _spinnerController.stop();
-      _spinnerController.reset();
-      if (mounted) setState(() => _isScanning = false);
+      // The controller is disposed with the state — stopping it after dispose
+      // throws, so both calls belong behind the mounted check.
+      if (mounted) {
+        _spinnerController.stop();
+        _spinnerController.reset();
+        setState(() => _isScanning = false);
+      }
     }
   }
 

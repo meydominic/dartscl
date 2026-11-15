@@ -1,6 +1,6 @@
 import 'package:dartscl_app/crop_overlay.dart';
 import 'package:dartscl_protocol/dartscl_protocol.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {

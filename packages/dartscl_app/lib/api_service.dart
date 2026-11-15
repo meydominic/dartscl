@@ -28,6 +28,57 @@ String get defaultApiBaseUrl {
   return 'http://localhost:8080';
 }
 
+/// Timeout for metadata requests (scanner list, capabilities, history).
+///
+/// Without a timeout a stalled backend leaves the UI in a permanently
+/// "scanning" state with every control disabled.
+const Duration _metadataTimeout = Duration(seconds: 15);
+
+/// Timeout for scan requests.
+///
+/// Generous, but still bounded: the backend caps a scan at ~5 minutes (1 min
+/// stale-job cleanup + 3 min document polling + one retry), so a shorter client
+/// timeout would report failure for a scan the server still completes and
+/// stores — the UI would then retry and duplicate the page.
+const Duration _scanTimeout = Duration(minutes: 7);
+
+/// Error thrown when the backend answers with a non-2xx status.
+///
+/// Carries the machine-readable `error` code from the response body so the UI
+/// can distinguish "scanner busy" from "storage full" instead of showing a bare
+/// status number.
+class ApiException implements Exception {
+  /// HTTP status code returned by the backend.
+  final int statusCode;
+
+  /// Error code from the JSON body (`{"error": "..."}`), when present.
+  final String? code;
+
+  const ApiException(this.statusCode, {this.code});
+
+  @override
+  String toString() =>
+      code == null ? 'HTTP $statusCode' : '$code (HTTP $statusCode)';
+}
+
+/// Builds an [ApiException] from a non-2xx [response].
+///
+/// Reads the backend's `{"error": "..."}` body when it is JSON; non-JSON error
+/// bodies (proxy pages, HTML) are ignored rather than crashing the parser.
+ApiException _errorFrom(http.Response response) {
+  String? code;
+  try {
+    final decoded = jsonDecode(response.body);
+    if (decoded is Map<String, dynamic>) {
+      final error = decoded['error'];
+      if (error is String) code = error;
+    }
+  } on FormatException {
+    // Not JSON — fall back to the status code alone.
+  }
+  return ApiException(response.statusCode, code: code);
+}
+
 /// Service for communicating with the DartSCL Dart Frog backend API.
 class ApiService {
   /// Base URL of the backend, without a trailing slash. An empty string
@@ -44,9 +95,11 @@ class ApiService {
 
   /// Fetches all discovered eSCL scanners from `GET /api/v1/scanners`.
   Future<List<ScannerDevice>> fetchScanners() async {
-    final response = await client.get(Uri.parse('$baseUrl/api/v1/scanners'));
+    final response = await client
+        .get(Uri.parse('$baseUrl/api/v1/scanners'))
+        .timeout(_metadataTimeout);
     if (response.statusCode != 200) {
-      throw Exception('Failed to load scanners: ${response.statusCode}');
+      throw _errorFrom(response);
     }
     final List<dynamic> jsonList = jsonDecode(response.body);
     return jsonList
@@ -56,26 +109,28 @@ class ApiService {
 
   /// Fetches capabilities for a target scanner from `GET /api/v1/scanners/[id]/capabilities`.
   Future<Map<String, dynamic>> fetchCapabilities(String scannerId) async {
-    final response = await client.get(
-      Uri.parse('$baseUrl/api/v1/scanners/$scannerId/capabilities'),
-    );
+    final response = await client
+        .get(
+          Uri.parse('$baseUrl/api/v1/scanners/$scannerId/capabilities'),
+        )
+        .timeout(_metadataTimeout);
     if (response.statusCode != 200) {
-      throw Exception('Failed to load capabilities: ${response.statusCode}');
+      throw _errorFrom(response);
     }
     return jsonDecode(response.body) as Map<String, dynamic>;
   }
 
   /// Requests a preview scan JPEG stream from `POST /api/v1/scan`.
   Future<Uint8List> requestPreviewScan(ScanJobConfig config) async {
-    final response = await client.post(
-      Uri.parse('$baseUrl/api/v1/scan'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode(config.toJson()),
-    );
+    final response = await client
+        .post(
+          Uri.parse('$baseUrl/api/v1/scan'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode(config.toJson()),
+        )
+        .timeout(_scanTimeout);
     if (response.statusCode != 200) {
-      throw Exception(
-        'Preview scan failed with status: ${response.statusCode}',
-      );
+      throw _errorFrom(response);
     }
     return response.bodyBytes;
   }
@@ -87,13 +142,15 @@ class ApiService {
   /// client must pass as [ScanJobConfig.targetPdfId] when appending to the
   /// same PDF in a subsequent scan.
   Future<ScanResult> triggerFinalScan(ScanJobConfig config) async {
-    final response = await client.post(
-      Uri.parse('$baseUrl/api/v1/scan'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode(config.toJson()),
-    );
+    final response = await client
+        .post(
+          Uri.parse('$baseUrl/api/v1/scan'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode(config.toJson()),
+        )
+        .timeout(_scanTimeout);
     if (response.statusCode != 200) {
-      throw Exception('Final scan job failed: ${response.statusCode}');
+      throw _errorFrom(response);
     }
     return ScanResult(
       bytes: response.bodyBytes,
@@ -104,9 +161,11 @@ class ApiService {
 
   /// Fetches the stored scan history from `GET /api/v1/scans`.
   Future<List<ScannedFile>> fetchScans() async {
-    final response = await client.get(Uri.parse('$baseUrl/api/v1/scans'));
+    final response = await client
+        .get(Uri.parse('$baseUrl/api/v1/scans'))
+        .timeout(_metadataTimeout);
     if (response.statusCode != 200) {
-      throw Exception('Failed to load scans: ${response.statusCode}');
+      throw _errorFrom(response);
     }
     final List<dynamic> jsonList = jsonDecode(response.body);
     return jsonList
@@ -124,10 +183,12 @@ class ApiService {
   ///
   /// A 404 (already gone) is treated as success for idempotency.
   Future<void> deleteScan(String id) async {
-    final response =
-        await client.delete(Uri.parse('$baseUrl/api/v1/scans/$id'));
+    final response = await client
+        .delete(Uri.parse('$baseUrl/api/v1/scans/$id'))
+        .timeout(_metadataTimeout);
+    // A 404 means the file is already gone — idempotent success.
     if (response.statusCode != 204 && response.statusCode != 404) {
-      throw Exception('Failed to delete scan: ${response.statusCode}');
+      throw _errorFrom(response);
     }
   }
 }
@@ -203,6 +264,23 @@ class PreviewImageNotifier extends Notifier<Uint8List?> {
 
 final previewImageProvider = NotifierProvider<PreviewImageNotifier, Uint8List?>(
   PreviewImageNotifier.new,
+);
+
+/// Aspect ratio (width / height) of the current preview image.
+///
+/// The compact layout sizes the crop overlay from this, so the overlay covers
+/// the painted page instead of a letterboxed 4:3 box — otherwise every crop
+/// ratio is computed against the wrong rectangle.
+class PreviewAspectNotifier extends Notifier<double?> {
+  @override
+  double? build() => null;
+
+  void setAspect(double? aspect) => state = aspect;
+}
+
+final previewAspectProvider =
+    NotifierProvider<PreviewAspectNotifier, double?>(
+  PreviewAspectNotifier.new,
 );
 
 /// Notifier that holds the current scan status message.

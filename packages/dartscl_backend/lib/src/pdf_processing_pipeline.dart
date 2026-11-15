@@ -68,7 +68,14 @@ class PdfProcessingPipeline {
     return pdf.save();
   }
 
-  /// Merges a newly generated PDF to the end of an existing PDF using pdf_manipulator.
+  /// Merges the document at [newPagePdfPath] to the end of [existingPdfPath]
+  /// and writes the combined document to [outputPath].
+  ///
+  /// The input documents are opened and closed by the library (`PdfFile`);
+  /// the output sink is opened here and always closed afterwards.
+  ///
+  /// Throws [FileSystemException] when an input file is missing, and a
+  /// `PdfError` when the engine cannot merge the documents.
   static Future<void> appendPdfPage({
     required String existingPdfPath,
     required String newPagePdfPath,
@@ -85,19 +92,19 @@ class PdfProcessingPipeline {
     }
 
     final pdf = Pdf();
-    FileSink? sink;
+    final sink = await FileSink.open(File(outputPath));
 
     try {
-      // DataSources direkt erzeugen (nicht erst über pdf.open)
-      final existingSource = FileSource(existingFile);
-      final newPageSource = FileSource(newPageFile);
-
-      sink = await FileSink.create(File(outputPath));
-
-      // merge erwartet List<DataSource>
-      await pdf.merge([existingSource, newPageSource], sink);
+      // The first input is the base document, the second is appended whole.
+      await pdf.merge([PdfFile(existingFile), PdfFile(newPageFile)], sink);
     } finally {
-      await sink?.close();
+      try {
+        await sink.close();
+      } finally {
+        // The engine handle must be released even when closing the sink fails,
+        // otherwise every append leaks a native worker.
+        await pdf.dispose();
+      }
     }
   }
 

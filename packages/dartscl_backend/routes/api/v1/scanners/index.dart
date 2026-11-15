@@ -6,6 +6,10 @@ import 'package:dartscl_backend/src/scanner_registry.dart';
 /// Scanner discovery runs at server startup, so this endpoint does no
 /// network I/O — it returns the cached device list immediately.
 Future<Response> onRequest(RequestContext context) async {
+  if (context.request.method != HttpMethod.get) {
+    return Response(statusCode: 405);
+  }
+
   final registry = context.read<ScannerRegistry>();
   final scanners = registry.getScanners();
 

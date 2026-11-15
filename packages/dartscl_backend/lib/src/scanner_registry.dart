@@ -40,7 +40,10 @@ class ScannerRegistry {
   })  : discoveryService = discoveryService ?? MdnsScannerDiscoveryService(),
         esclClient = esclClient ?? EsclClient(),
         useMockFallback = useMockFallback ??
-            Platform.environment['DARTSCL_USE_MOCK']?.toLowerCase() != 'false';
+            // Opt-in only: previously any value except 'false' enabled the
+            // fallback, so a failed mDNS lookup silently installed fake
+            // scanners and fabricated scans got stored as real documents.
+            (Platform.environment['DARTSCL_USE_MOCK']?.toLowerCase() == 'true');
 
   // ---------------------------------------------------------------------------
   // Startup / Refresh
@@ -139,7 +142,7 @@ class ScannerRegistry {
     final device = _cachedDevices[scannerId];
     if (device == null) return {};
     if (device.id.startsWith('mock-')) {
-      return _mockCapabilities(device);
+      return _mockCapabilities();
     }
     try {
       final caps = await esclClient.fetchCapabilities(device);
@@ -151,12 +154,16 @@ class ScannerRegistry {
     }
   }
 
+  /// Returns the capabilities cached for [scannerId], or `null` when the cache
+  /// is cold. Unlike [getCapabilities] this never performs network I/O, so it
+  /// is safe on a request's hot path (e.g. request validation).
+  Map<String, dynamic>? getCachedCapabilities(String scannerId) =>
+      _capabilitiesCache[scannerId];
+
   /// Returns hardcoded capabilities for mock scanner devices.
-  Map<String, dynamic> _mockCapabilities(ScannerDevice device) => {
-        'dpi': [100, 200, 300, 600],
-        'colorModes': ['RGB24', 'Grayscale8'],
-        'sources': ['platen', 'adf'],
-        'maxWidth': 2159,
-        'maxHeight': 2983,
-      };
+  ///
+  /// Delegates to [MockScannerService] so mock and real capabilities cannot
+  /// drift apart — they previously used different DPI lists and colour modes.
+  Map<String, dynamic> _mockCapabilities() =>
+      mockScannerService.dummyCapabilities;
 }
